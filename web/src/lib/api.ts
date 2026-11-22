@@ -90,19 +90,17 @@ export interface NewOrder {
 export type DocType = 'id_card' | 'passport' | 'residence'
 export interface KycForm {
   doc_type: DocType
-  /** Строки машиночитаемой зоны: сервер сам проверяет их и берёт из них данные */
-  mrz_lines?: string[]
-  /** Заполняются вручную, только если MRZ не считалась */
-  full_name?: string
-  birth_date?: string
-  citizenship?: string
   doc_number?: string
+  /** ИИН или личный номер из документа */
+  personal_number?: string
+  issue_date?: string
   expiry_date?: string
+  issued_by?: string
+  citizenship?: string
+  birth_place?: string
   address?: string
-  /** dataURL jpeg: doc_front, doc_back (кроме паспорта), face, doc_face (лицо из документа) */
-  files: { doc_front?: string; doc_back?: string; face?: string; doc_face?: string }
-  liveness: { passed: boolean; steps: string[]; method: string }
-  face_match?: { score: number; passed: boolean } | null
+  /** dataURL jpeg: doc_front, doc_back (кроме паспорта), selfie (селфи с документом) */
+  files: { doc_front?: string; doc_back?: string; selfie?: string }
 }
 
 const TOKEN_KEY = 'nex.token'
@@ -260,6 +258,46 @@ export const api = {
       return demoUser()
     }
     return call<User>('/profile', { method: 'POST', body: JSON.stringify(f) })
+  },
+
+  /* ----- Face ID / Touch ID (passkey) ----- */
+  async passkeyLoginOptions(): Promise<{ cid: string; options: any }> { // eslint-disable-line @typescript-eslint/no-explicit-any
+    return call('/auth/passkey/login/options', { method: 'POST' })
+  },
+  async passkeyLoginVerify(cid: string, response: unknown): Promise<void> {
+    const r = await call<{ token: string }>('/auth/passkey/login/verify', { method: 'POST', body: JSON.stringify({ cid, response }) })
+    store.set(TOKEN_KEY, r.token)
+  },
+  async passkeyRegisterOptions(): Promise<{ cid: string; options: any }> { // eslint-disable-line @typescript-eslint/no-explicit-any
+    return call('/passkeys/register/options', { method: 'POST' })
+  },
+  async passkeyRegisterVerify(cid: string, response: unknown, device: string): Promise<void> {
+    await call('/passkeys/register/verify', { method: 'POST', body: JSON.stringify({ cid, response, device }) })
+  },
+  async passkeys(): Promise<{ id: string; device: string | null; created_at: string; last_used_at: string | null }[]> {
+    if (DEMO) return demo.load('passkeys', [])
+    return call('/passkeys')
+  },
+  async deletePasskey(id: string): Promise<void> {
+    if (DEMO) return demo.save('passkeys', [])
+    await call(`/passkeys/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  },
+
+  /* ----- push-уведомления ----- */
+  async pushKey(): Promise<string> {
+    return (await call<{ key: string }>('/push/key')).key
+  },
+  async pushSubscribe(sub: PushSubscriptionJSON): Promise<void> {
+    if (DEMO) return
+    await call('/push/subscribe', { method: 'POST', body: JSON.stringify(sub) })
+  },
+  async pushUnsubscribe(endpoint: string): Promise<void> {
+    if (DEMO) return
+    await call('/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint }) })
+  },
+  async pushTest(): Promise<number> {
+    if (DEMO) return 0
+    return (await call<{ sent: number }>('/push/test', { method: 'POST' })).sent
   },
 
   logout() {

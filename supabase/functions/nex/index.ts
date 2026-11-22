@@ -1,7 +1,9 @@
 // NEX backend: API для мини-приложения + вебхук Telegram-бота + проверка уведомлений о курсе.
 // Секреты: BOT_TOKEN, ADMIN_IDS (через запятую), WEBAPP_URL, CRON_SECRET.
 import { createClient } from 'npm:@supabase/supabase-js@2.45.4'
-import { namesMatch, parseMrz } from './mrz.ts'
+import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from 'npm:@simplewebauthn/server@13.3.3'
+import { pushEndpointOk, pushToUser, vapidKey } from './push.ts'
+import { adminApi, adminBotCallback, adminBotCommand, adminCleanup, initAdmin } from './admin.ts'
 
 const db = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!, { auth: { persistSession: false } })
 
@@ -291,6 +293,15 @@ const appButton = (text: string, start?: string) => ({
   inline_keyboard: [[{ text, web_app: { url: WEBAPP_URL + (start ? `?startapp=${start}` : '') } }]],
 })
 const isAdmin = (id: number) => ADMIN_IDS.includes(id)
+/** Push на телефон (если клиент включил уведомления в приложении). Ошибки не мешают основному действию. */
+async function pushU(uid: number, title: string, body: string, start?: string) {
+  try {
+    await pushToUser(db, uid, { title, body, url: start ? `/?startapp=${start}` : '/', tag: start }, WEBAPP_URL || 'mailto:support@nex.app')
+  } catch (e) {
+    console.error('push', e)
+  }
+}
+const plain = (s: string) => s.replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
 async function notifyAdmins(text: string, extra: Record<string, unknown> = {}) {
   const ids: number[] = []
   for (const a of ADMIN_IDS) {
@@ -506,6 +517,7 @@ async function onMessage(m: any) {
   }
 
   // ----- команды администратора -----
+  if (cmd === '/panel') return adminBotCommand(from, arg)
   if (cmd === '/orders') {
     const { data } = await db.from('orders').select('*, users(*)').in('status', ['new', 'accepted']).order('created_at').limit(20)
     if (!data?.length) return send(from.id, 'Активных заявок нет.')
@@ -546,6 +558,7 @@ async function onMessage(m: any) {
 }
 
 const ADMIN_COMMANDS = [
+  { command: 'panel', description: 'Панель управления' },
   { command: 'orders', description: 'Активные заявки' },
   { command: 'kyc', description: 'Анкеты на проверке' },
   { command: 'stats', description: 'Статистика' },
@@ -557,6 +570,7 @@ const ADMIN_HELP = [
   '',
   'Новые заявки и анкеты приходят сюда автоматически.',
   '',
+  '/panel: ссылка на панель управления',
   '/orders: активные заявки',
   '/kyc: анкеты на проверке',
   '/stats: статистика за 30 дней',
@@ -597,31 +611,41 @@ async function onCallback(q: any) {
     return answer('Готово')
   }
 
+  if (await adminBotCallback(q, action, idStr)) return
   if (!isAdmin(q.from.id)) return answer('Недостаточно прав', true)
   const id = Number(idStr)
 
   if (action === 'kyc_ok' || action === 'kyc_no') {
     const verified = action === 'kyc_ok'
-    const { data: u } = await db
-      .from('users')
-      .update({ kyc_status: verified ? 'verified' : 'rejected', kyc_note: verified ? null : 'данные или фото не прошли проверку' })
-      .eq('id', id)
-      .select()
-      .single()
+    const u = await kycDecide(id, verified, null, null)
     await tg('editMessageReplyMarkup', { chat_id: q.message.chat.id, message_id: q.message.message_id, reply_markup: { inline_keyboard: [] } })
+    if (!u) return answer('Анкета уже рассмотрена', true)
     await send(q.message.chat.id, `${verified ? '✅ Верификация одобрена' : '✖️ Верификация отклонена'}: ${clientLine(u)}`)
-    await send(
-      id,
-      verified
-        ? '✅ Ваш аккаунт подтверждён! В профиле появилась отметка «Подтверждён», лимит обмена увеличен.'
-        : '✖️ Верификация не пройдена: данные или фото не прошли проверку. Проверьте анкету и отправьте её снова.',
-      { reply_markup: appButton('Открыть профиль', 'kyc') },
-    )
     return answer(verified ? 'Одобрено' : 'Отклонено')
   }
 
+  const r = await orderTransition(id, action as OrderAction, null, { chat: q.message.chat.id, msg: q.message.message_id })
+  if ('error' in r) return answer(r.error, true)
+  const { o } = r
+  if (action === 'acc') {
+    // Контакт клиента отдельным сообщением, чтобы было удобно написать
+    const u = o.users
+    await send(
+      q.message.chat.id,
+      `📇 Контакт клиента по заявке №${o.id}:\n${clientLine(u)}${u.phone ? `\n📞 ${esc(u.phone)}` : ''}\n\n${u.username ? 'Нажмите на имя или @username, чтобы написать.' : 'У клиента нет @username: нажмите на имя, чтобы открыть профиль.'}\nПосле обмена нажмите «🤝 Подтвердить обмен» в заявке выше.`,
+    )
+    if (u.phone && !u.username) await tg('sendContact', { chat_id: q.message.chat.id, phone_number: u.phone, first_name: u.first_name || 'Клиент' })
+  }
+  return answer('Готово')
+}
+
+/* ---------------- общие действия оператора (бот и админ-панель) ---------------- */
+export type OrderAction = 'acc' | 'done' | 'rej'
+/** Смена статуса заявки с защитой от гонки: меняется, только если статус не изменился с момента чтения */
+// deno-lint-ignore no-explicit-any
+async function orderTransition(id: number, action: OrderAction, adminId: number | null, extraMsg: { chat: number; msg: number } | null = null): Promise<{ error: string } | { o: any; upd: any }> {
   const { data: o } = await db.from('orders').select('*, users(*)').eq('id', id).maybeSingle()
-  if (!o) return answer('Заявка не найдена', true)
+  if (!o) return { error: 'Заявка не найдена' }
   await withProfile(o.users)
   const now = new Date().toISOString()
   let patch: Record<string, unknown> | null = null
@@ -633,34 +657,81 @@ async function onCallback(q: any) {
     patch = { status: 'completed', completed_at: now }
     userMsg = `✅ Обмен по заявке №${o.id} завершён.\n\nВы получили ${money(+o.amount_to, o.to_cur)}. Спасибо, что выбрали NEX!`
   } else if (action === 'rej' && (o.status === 'new' || o.status === 'accepted')) {
-    patch = { status: 'rejected' }
+    patch = { status: 'rejected', rejected_at: now }
     userMsg = `✖️ Заявка №${o.id} отклонена оператором. Если есть вопросы, напишите в поддержку.`
   }
-  if (!patch) return answer('Статус заявки уже изменён', true)
-
+  if (!patch) return { error: 'Статус заявки уже изменён' }
+  if (adminId) patch.handled_by = adminId
   const { data: upd } = await db.from('orders').update(patch).eq('id', o.id).eq('status', o.status).select().maybeSingle()
-  if (!upd) return answer('Статус заявки уже изменён', true)
+  if (!upd) return { error: 'Статус заявки уже изменён' }
   if (upd.status === 'rejected' && +upd.bonus_used_kzt > 0) await db.rpc('user_credit', { uid: o.user_id, bonus: +upd.bonus_used_kzt, volume: 0 })
   if (upd.status === 'completed') await onCompleted(upd, o.users)
-  await tg('editMessageText', {
-    chat_id: q.message.chat.id,
-    message_id: q.message.message_id,
-    text: orderText(upd, o.users, STATUS_HEAD[upd.status] + upd.id),
-    parse_mode: 'HTML',
-    reply_markup: orderKeyboard(upd, o.users),
-  })
-  if (action === 'acc') {
-    // Контакт клиента отдельным сообщением, чтобы было удобно написать
-    const u = o.users
-    await send(
-      q.message.chat.id,
-      `📇 Контакт клиента по заявке №${o.id}:\n${clientLine(u)}${u.phone ? `\n📞 ${esc(u.phone)}` : ''}\n\n${u.username ? 'Нажмите на имя или @username, чтобы написать.' : 'У клиента нет @username: нажмите на имя, чтобы открыть профиль.'}\nПосле обмена нажмите «🤝 Подтвердить обмен» в заявке выше.`,
-    )
-    if (u.phone && !u.username) await tg('sendContact', { chat_id: q.message.chat.id, phone_number: u.phone, first_name: u.first_name || 'Клиент' })
-  }
+  // Сообщение о заявке в чате оператора обновляется, где бы её ни обработали
+  const text = orderText(upd, o.users, STATUS_HEAD[upd.status] + upd.id)
+  const edits: { chat: number; msg: number }[] = []
+  if (o.admin_msg_id && ADMIN_IDS[0]) edits.push({ chat: ADMIN_IDS[0], msg: o.admin_msg_id })
+  if (extraMsg && !edits.some((e) => e.chat === extraMsg.chat && e.msg === extraMsg.msg)) edits.push(extraMsg)
+  for (const e of edits) await tg('editMessageText', { chat_id: e.chat, message_id: e.msg, text, parse_mode: 'HTML', reply_markup: orderKeyboard(upd, o.users) })
   await send(o.user_id, userMsg, { reply_markup: appButton('Открыть заявку', `order_${o.id}`) })
-  return answer('Готово')
+  const [head, ...rest] = plain(userMsg).split('\n\n')
+  await pushU(o.user_id, head.replace(/^\S+\s/, ''), rest.join(' ') || 'Откройте заявку в NEX', `order_${o.id}`)
+  return { o, upd }
 }
+
+/** Решение по анкете: только если она ещё на проверке */
+async function kycDecide(uid: number, verified: boolean, note: string | null, adminId: number | null) {
+  const { data: u } = await db
+    .from('users')
+    .update({
+      kyc_status: verified ? 'verified' : 'rejected',
+      kyc_note: verified ? null : note || 'данные или фото не прошли проверку',
+      kyc_reviewed_at: new Date().toISOString(),
+      ...(adminId ? { kyc_reviewed_by: adminId } : {}),
+    })
+    .eq('id', uid)
+    .eq('kyc_status', 'pending')
+    .select()
+    .maybeSingle()
+  if (!u) return null
+  await send(
+    uid,
+    verified
+      ? '✅ Ваш аккаунт подтверждён! В профиле появилась отметка «Подтверждён», лимит обмена увеличен.'
+      : `✖️ Верификация не пройдена: ${esc(u.kyc_note)}. Проверьте анкету и отправьте её снова.`,
+    { reply_markup: appButton('Открыть профиль', 'kyc') },
+  )
+  await pushU(uid, verified ? 'Аккаунт подтверждён' : 'Верификация не пройдена', verified ? 'Лимит обмена увеличен до 5 000 000 ₸.' : `${u.kyc_note}. Отправьте анкету снова.`, 'kyc')
+  return u
+}
+
+/** Полный сброс верификации: анкета и зашифрованные сканы */
+async function kycReset(uid: number) {
+  const { data: list } = await db.storage.from('kyc').list(String(uid), { limit: 1000 })
+  const paths = (list ?? []).map((f) => `${uid}/${f.name}`)
+  if (paths.length) await db.storage.from('kyc').remove(paths)
+  await db.from('users').update({ kyc_status: 'none', kyc: null, kyc_enc: null, kyc_note: null, kyc_submitted_at: null, kyc_reviewed_at: null, kyc_reviewed_by: null }).eq('id', uid)
+  return paths.length
+}
+
+initAdmin({
+  db,
+  tg,
+  send,
+  esc,
+  nf,
+  hmacHex: async (key, msg) => hex(await hmac(key, msg)),
+  secret: () => BOT_TOKEN,
+  adminIds: () => ADMIN_IDS,
+  webappUrl: () => WEBAPP_URL,
+  decryptJson,
+  decryptBytes,
+  readProfile,
+  loyalty,
+  orderTransition,
+  kycDecide,
+  kycReset,
+  numify,
+})
 
 /** Обмен завершён: оборот для уровня лояльности и бонус пригласившему */
 // deno-lint-ignore no-explicit-any
@@ -670,20 +741,23 @@ async function onCompleted(o: any, u: any) {
   const before = tierOf(Number(u.volume_kzt ?? 0))
   await db.rpc('user_credit', { uid: o.user_id, bonus: 0, volume: kzt })
   const after = tierOf(Number(u.volume_kzt ?? 0) + kzt)
-  if (after.id !== before.id)
+  if (after.id !== before.id) {
     await send(o.user_id, `🏆 Новый уровень: <b>${after.name}</b>! Теперь комиссия на ${after.off}% ниже на все обмены.`, { reply_markup: appButton('Открыть NEX') })
+    await pushU(o.user_id, `Новый уровень: ${after.name}`, `Комиссия на ${after.off}% ниже на все обмены.`, 'loyalty')
+  }
   if (u.referred_by) {
     const netFeeKzt = (+o.fee_amount - +(o.bonus_used ?? 0)) * cross(m, o.to_cur, 'KZT')
     const reward = Math.floor(Math.max(0, netFeeKzt) * REF_SHARE)
     if (reward > 0) {
       await db.rpc('user_credit', { uid: u.referred_by, bonus: reward, volume: 0, ref_earned: reward })
       await send(u.referred_by, `🎁 Ваш друг совершил обмен. Вам начислено ${nf(reward, 0)} ₸ бонусов: ими можно оплатить комиссию следующего обмена.`, { reply_markup: appButton('Открыть NEX') })
+      await pushU(u.referred_by, 'Бонусы за друга', `Начислено ${nf(reward, 0)} ₸ бонусов.`, 'loyalty')
     }
   }
 }
 
 const DOC_NAME: Record<string, string> = { id_card: 'Удостоверение личности', passport: 'Паспорт', residence: 'Вид на жительство' }
-const FILE_NAME: Record<string, string> = { doc_front: 'Документ, лицевая сторона', doc_back: 'Документ, оборотная сторона', face: 'Сканирование лица', doc_face: 'Фото из документа' }
+const FILE_NAME: Record<string, string> = { doc_front: 'Документ, лицевая сторона', doc_back: 'Документ, оборотная сторона', selfie: 'Селфи с документом', face: 'Сканирование лица', doc_face: 'Фото из документа' }
 
 // deno-lint-ignore no-explicit-any
 async function sendKycToAdmin(chat: number, u: any, withPhotos = true) {
@@ -716,32 +790,66 @@ async function sendKycToAdmin(chat: number, u: any, withPhotos = true) {
   }
   const checks: { label: string; ok: boolean | null; note?: string }[] = Array.isArray(k.checks) ? k.checks : []
   const mark = (ok: boolean | null) => (ok === true ? '✅' : ok === false ? '❌' : '➖')
-  const failed = checks.filter((c) => c.ok !== true).length
+  const failed = checks.filter((c) => c.ok === false).length
   return send(
     chat,
     [
       '🪪 <b>Анкета на верификацию</b>',
       '',
       `👤 ${clientLine(u)}  ID: <code>${u.id}</code>`,
-      checks.length ? (k.auto_passed ? '🟢 <b>Сверка пройдена</b>' : `🟠 <b>Сверка не пройдена</b> (${failed} из ${checks.length})`) : '',
+      checks.length ? (k.auto_passed ? '🟢 <b>Проверка данных пройдена</b>' : `🟠 <b>Проверка данных не пройдена</b> (${failed} из ${checks.length})`) : '',
       '',
       `ФИО: ${esc(k.full_name)}`,
       k.latin_name ? `Латиницей: ${esc(k.latin_name)}` : '',
       `Дата рождения: ${esc(k.birth_date)}`,
       `Гражданство: ${esc(k.citizenship)}`,
       `Документ: ${esc(DOC_NAME[k.doc_type] ?? k.doc_type)}, № ${esc(k.doc_number)}`,
-      k.expiry_date ? `Действителен до: ${esc(k.expiry_date)}` : '',
       k.personal_number ? `ИИН / личный номер: ${esc(k.personal_number)}` : '',
+      k.issued_by ? `Кем выдан: ${esc(k.issued_by)}` : '',
+      k.issue_date ? `Дата выдачи: ${esc(k.issue_date)}` : '',
+      k.expiry_date ? `Действителен до: ${esc(k.expiry_date)}` : '',
+      k.birth_place ? `Место рождения: ${esc(k.birth_place)}` : '',
       `Телефон: ${esc(k.phone)}`,
       k.address ? `Адрес: ${esc(k.address)}` : '',
-      ...(checks.length ? ['', '<b>Автоматическая сверка</b>', ...checks.map((c) => `${mark(c.ok)} ${esc(c.label)}${c.note ? ` (${esc(c.note)})` : ''}`)] : []),
+      ...(checks.length ? ['', '<b>Автоматическая проверка данных</b>', ...checks.map((c) => `${mark(c.ok)} ${esc(c.label)}${c.note ? ` (${esc(c.note)})` : ''}`)] : []),
       '',
-      'Сверьте сканы выше с данными и нажмите кнопку.',
+      'Сверьте фото выше с данными: лицо на селфи совпадает с фото в документе, данные читаются и совпадают. Затем нажмите кнопку.',
     ]
       .filter((l, i, a) => l !== '' || a[i - 1] !== '')
       .join('\n'),
     { reply_markup: { inline_keyboard: [[{ text: '✅ Одобрить', callback_data: `kyc_ok:${u.id}` }, { text: '✖️ Отклонить', callback_data: `kyc_no:${u.id}` }]] } },
   )
+}
+
+/** Домен приложения для Face ID (WebAuthn): ключи привязаны к нему */
+function rpInfo() {
+  try {
+    const u = new URL(WEBAPP_URL)
+    return { id: u.hostname, origin: u.origin }
+  } catch {
+    return null
+  }
+}
+
+/** Контрольный разряд ИИН РК */
+function iinValid(s: string) {
+  if (!/^\d{12}$/.test(s)) return false
+  const d = s.split('').map(Number)
+  let c = d.slice(0, 11).reduce((a, x, i) => a + x * (i + 1), 0) % 11
+  if (c === 10) {
+    c = d.slice(0, 11).reduce((a, x, i) => a + x * (((i + 2) % 11) + 1), 0) % 11
+    if (c === 10) return false
+  }
+  return c === d[11]
+}
+function iinToBirth(s: string) {
+  const c = +s[6]
+  const century = c <= 2 ? 1800 : c <= 4 ? 1900 : 2000
+  return `${century + +s.slice(0, 2)}-${s.slice(2, 4)}-${s.slice(4, 6)}`
+}
+/** Сигнатура JPEG, PNG или WebP: на сервер принимаются только изображения */
+function isImage(b: Uint8Array) {
+  return (b[0] === 0xff && b[1] === 0xd8) || (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) || (b[0] === 0x52 && b[1] === 0x49 && b[8] === 0x57 && b[9] === 0x45)
 }
 
 /* ---------------- API приложения ---------------- */
@@ -840,6 +948,49 @@ async function api(req: Request, path: string): Promise<Response> {
     await send(data.user_id, '✅ Выполнен вход в NEX по номеру телефона. Если это были не вы, напишите в поддержку.')
     return json({ token: await makeToken(data.user_id) })
   }
+
+  /* ----- вход по Face ID / Touch ID (passkey) ----- */
+  if (path === '/auth/passkey/login/options' && method === 'POST') {
+    const rp = rpInfo()
+    if (!rp) return fail('Вход по Face ID недоступен', 503)
+    const ipHash = hex(await hmac('nex-ip', req.headers.get('x-forwarded-for')?.split(',')[0].trim() ?? '')).slice(0, 32)
+    const { count } = await db.from('webauthn_challenges').select('*', { count: 'exact', head: true }).eq('ip_hash', ipHash).gte('created_at', new Date(Date.now() - 10 * 60_000).toISOString())
+    if ((count ?? 0) >= 20) return fail('Слишком много попыток. Попробуйте через 10 минут.', 429)
+    const options = await generateAuthenticationOptions({ rpID: rp.id, userVerification: 'required', timeout: 60_000 })
+    const cid = hex(crypto.getRandomValues(new Uint8Array(16)))
+    await db.from('webauthn_challenges').insert({ id: cid, kind: 'login', challenge: options.challenge, ip_hash: ipHash })
+    return json({ cid, options })
+  }
+  if (path === '/auth/passkey/login/verify' && method === 'POST') {
+    const rp = rpInfo()
+    const b = await req.json().catch(() => ({}))
+    // Вызов одноразовый: удаляем сразу, повторить тот же ответ нельзя
+    const { data: ch } = await db.from('webauthn_challenges').delete().eq('id', String(b.cid ?? '')).eq('kind', 'login').select().maybeSingle()
+    if (!rp || !ch || Date.now() - new Date(ch.created_at).getTime() > 2 * 60_000) return fail('Время ожидания истекло. Попробуйте ещё раз.', 410)
+    const credId = String(b.response?.id ?? '')
+    const { data: pk } = await db.from('passkeys').select('*').eq('id', credId).maybeSingle()
+    if (!pk) return fail('Этот Face ID не привязан к аккаунту NEX. Войдите по номеру телефона и включите Face ID в профиле.', 404)
+    let v
+    try {
+      v = await verifyAuthenticationResponse({
+        response: b.response,
+        expectedChallenge: ch.challenge,
+        expectedOrigin: rp.origin,
+        expectedRPID: rp.id,
+        requireUserVerification: true,
+        credential: { id: pk.id, publicKey: fromB64(pk.public_key), counter: Number(pk.counter), transports: pk.transports ?? undefined },
+      })
+    } catch (e) {
+      console.error('passkey login', e)
+      return fail('Не удалось подтвердить Face ID', 401)
+    }
+    if (!v.verified) return fail('Не удалось подтвердить Face ID', 401)
+    await db.from('passkeys').update({ counter: v.authenticationInfo.newCounter, last_used_at: new Date().toISOString() }).eq('id', pk.id)
+    const u = await getUser(pk.user_id)
+    if (!u || u.blocked) return fail('Доступ ограничен. Обратитесь в поддержку.', 403)
+    return json({ token: await makeToken(pk.user_id) })
+  }
+  if (path === '/push/key' && method === 'GET') return json({ key: (await vapidKey(db)).pub })
 
   // ниже нужна авторизация
   const uid = await readToken(req.headers.get('x-nex-token'))
@@ -960,62 +1111,69 @@ async function api(req: Request, path: string): Promise<Response> {
     const b = await req.json()
     if (!['id_card', 'passport', 'residence'].includes(b.doc_type)) return fail('Выберите документ')
     const prof = await readProfile(user)
-    // Данные документа берутся из машиночитаемой зоны, проверенной на сервере; ручной ввод только если MRZ не считалась
-    const mrz = Array.isArray(b.mrz_lines) ? parseMrz(b.mrz_lines.slice(0, 3).map(String)) : null
-    const str = (k: string) => String(b[k] ?? '').trim().slice(0, 200)
+    if (!prof.full_name || !prof.birth_date) return fail('Сначала заполните личные данные', 400, { code: 'profile' })
+    const str = (k: string, n = 120) => String(b[k] ?? '').trim().replace(/[\u0000-\u001f]/g, '').slice(0, n)
+    const date = (k: string) => (/^\d{4}-\d{2}-\d{2}$/.test(str(k)) && !isNaN(Date.parse(str(k))) ? str(k) : '')
     const fields = {
-      full_name: str('full_name') || prof.full_name || '',
-      latin_name: mrz ? `${mrz.surname} ${mrz.given_names}`.trim() : '',
-      birth_date: mrz?.birth_date || str('birth_date'),
-      citizenship: mrz?.nationality || str('citizenship'),
-      doc_number: mrz?.doc_number || str('doc_number'),
-      expiry_date: mrz?.expiry_date || str('expiry_date'),
-      personal_number: mrz?.personal_number || str('personal_number'),
-      sex: mrz?.sex || '',
+      full_name: prof.full_name,
+      birth_date: prof.birth_date,
+      citizenship: str('citizenship', 60),
+      doc_number: str('doc_number', 20).toUpperCase().replace(/[^A-ZА-Я0-9]/g, ''),
+      personal_number: str('personal_number', 20).replace(/[^0-9A-Za-z]/g, ''),
+      issue_date: date('issue_date'),
+      expiry_date: date('expiry_date'),
+      issued_by: str('issued_by', 120),
+      birth_place: str('birth_place', 120),
+      address: str('address', 200),
       phone: user.phone ?? '',
-      address: str('address'),
     }
-    if (!fields.full_name || !fields.birth_date || !fields.doc_number) return fail('Отсканируйте документ или заполните данные')
+    const today = new Date().toISOString().slice(0, 10)
+    if (fields.doc_number.length < 5) return fail('Введите номер документа')
+    if (!fields.issue_date || fields.issue_date > today) return fail('Проверьте дату выдачи')
+    if (!fields.expiry_date) return fail('Укажите срок действия документа')
+    if (fields.expiry_date <= today) return fail('Срок действия документа истёк')
+    if (fields.issued_by.length < 2) return fail('Укажите, кем выдан документ')
+    if (!fields.citizenship) return fail('Укажите гражданство')
+    if (fields.address.length < 5) return fail('Укажите адрес проживания')
+    const kz = /казах|kazakh|^kz$/i.test(fields.citizenship)
+    if (kz && !iinValid(fields.personal_number)) return fail('Проверьте ИИН: 12 цифр без ошибок')
     const age = (Date.now() - new Date(fields.birth_date).getTime()) / (365.25 * 86400_000)
     if (!(age >= 18 && age < 110)) return fail('Сервис доступен с 18 лет')
-    if (fields.expiry_date && new Date(fields.expiry_date).getTime() < Date.now() - 86400_000) return fail('Срок действия документа истёк')
     const needBack = b.doc_type !== 'passport'
-    const keys = ['doc_front', ...(needBack ? ['doc_back'] : []), 'face', ...(b.files?.doc_face ? ['doc_face'] : [])]
+    const keys = ['doc_front', ...(needBack ? ['doc_back'] : []), 'selfie']
     const files: Record<string, string> = {}
     for (const key of keys) {
       const m = /^data:image\/(jpeg|png|webp);base64,(.+)$/.exec(String(b.files?.[key] ?? ''))
-      if (!m) {
-        if (key === 'doc_face') continue
-        return fail(key === 'face' ? 'Пройдите сканирование лица' : 'Отсканируйте документ')
-      }
+      if (!m) return fail(key === 'selfie' ? 'Добавьте селфи с документом' : 'Добавьте фото документа')
       const bytes = fromB64(m[2])
       if (bytes.length > 4_000_000) return fail('Изображение слишком большое')
+      if (!isImage(bytes)) return fail('Файл не похож на фотографию')
       // Фото шифруются до записи в хранилище
       const path = `${uid}/${Date.now()}-${key}.bin`
       const { error } = await db.storage.from('kyc').upload(path, await encryptBytes(bytes), { contentType: 'application/octet-stream', upsert: true })
       if (error) return fail('Не удалось сохранить файлы', 500)
       files[key] = path
     }
-    const live = b.liveness ?? {}
-    const face = b.face_match ?? {}
-    const score = Number(face.score)
-    // Автоматическая сверка: каждая проверка со своим итогом
+    // Автоматические проверки введённых данных: оператору видно, что сошлось, а что нет
+    const iinBirth = kz && fields.personal_number.length === 12 ? iinToBirth(fields.personal_number) : null
     const checks: { id: string; label: string; ok: boolean | null; note?: string }[] = [
-      { id: 'mrz', label: 'Машиночитаемая зона считана', ok: !!mrz, note: mrz ? mrz.format : 'данные введены вручную' },
-      { id: 'mrz_valid', label: 'Контрольные цифры документа', ok: mrz ? mrz.valid : null },
-      { id: 'expiry', label: 'Документ действителен', ok: fields.expiry_date ? new Date(fields.expiry_date).getTime() > Date.now() : null, note: fields.expiry_date || undefined },
       { id: 'adult', label: 'Возраст 18+', ok: age >= 18 },
-      { id: 'name', label: 'ФИО совпадает с анкетой', ok: mrz && prof.full_name ? namesMatch(prof.full_name, mrz) : null },
-      { id: 'dob', label: 'Дата рождения совпадает с анкетой', ok: prof.birth_date ? prof.birth_date === fields.birth_date : null },
-      { id: 'liveness', label: 'Живое лицо (движения головой)', ok: !!live.passed },
-      { id: 'face', label: 'Лицо совпадает с фото в документе', ok: isFinite(score) ? !!face.passed : null, note: isFinite(score) ? `сходство ${Math.round(score * 100)}%` : 'не удалось сравнить' },
+      { id: 'expiry', label: 'Документ действителен', ok: fields.expiry_date > today, note: fields.expiry_date },
+      { id: 'dates', label: 'Дата выдачи раньше срока действия', ok: fields.issue_date < fields.expiry_date },
+      { id: 'issued_after_birth', label: 'Документ выдан после 14 лет', ok: (new Date(fields.issue_date).getTime() - new Date(fields.birth_date).getTime()) / (365.25 * 86400_000) >= 14 },
+      ...(kz
+        ? [
+            { id: 'iin', label: 'ИИН корректен (контрольная цифра)', ok: iinValid(fields.personal_number) },
+            { id: 'iin_dob', label: 'ИИН совпадает с датой рождения', ok: iinBirth === fields.birth_date, note: iinBirth ?? undefined },
+            { id: 'doc_format', label: 'Формат номера документа', ok: b.doc_type === 'id_card' ? /^\d{9}$/.test(fields.doc_number) : b.doc_type === 'passport' ? /^N\d{8}$/.test(fields.doc_number) : null },
+          ]
+        : []),
+      { id: 'phone', label: 'Телефон подтверждён Telegram', ok: !!user.phone_verified },
     ]
-    const passed = checks.every((c) => c.ok === true)
+    const passed = checks.every((c) => c.ok !== false)
     const kyc: Record<string, unknown> = {
       ...fields,
       doc_type: b.doc_type,
-      mrz_lines: mrz?.lines ?? null,
-      liveness: { passed: !!live.passed, steps: Array.isArray(live.steps) ? live.steps.slice(0, 8).map(String) : [], method: String(live.method ?? '').slice(0, 40) },
       checks,
       auto_passed: passed,
       files,
@@ -1029,6 +1187,83 @@ async function api(req: Request, path: string): Promise<Response> {
       .single()
     for (const a of ADMIN_IDS) await sendKycToAdmin(a, u)
     return json(await publicUser(await getUser(uid)))
+  }
+
+  /* ----- push-подписки ----- */
+  if (path === '/push/subscribe' && method === 'POST') {
+    const b = await req.json().catch(() => ({}))
+    const endpoint = String(b.endpoint ?? '')
+    const p256dh = String(b.keys?.p256dh ?? '')
+    const auth = String(b.keys?.auth ?? '')
+    if (!pushEndpointOk(endpoint) || endpoint.length > 1000 || !/^[A-Za-z0-9_-]{80,100}$/.test(p256dh) || !/^[A-Za-z0-9_-]{16,30}$/.test(auth)) return fail('Некорректная подписка')
+    const { count } = await db.from('push_subs').select('*', { count: 'exact', head: true }).eq('user_id', uid)
+    if ((count ?? 0) >= 10) {
+      const { data: old } = await db.from('push_subs').select('id').eq('user_id', uid).order('created_at').limit(1)
+      if (old?.[0]) await db.from('push_subs').delete().eq('id', old[0].id)
+    }
+    await db.from('push_subs').upsert({ user_id: uid, endpoint, p256dh, auth, ua: String(req.headers.get('user-agent') ?? '').slice(0, 200) }, { onConflict: 'endpoint' })
+    return json({ ok: true })
+  }
+  if (path === '/push/unsubscribe' && method === 'POST') {
+    const b = await req.json().catch(() => ({}))
+    await db.from('push_subs').delete().eq('user_id', uid).eq('endpoint', String(b.endpoint ?? ''))
+    return json({ ok: true })
+  }
+  if (path === '/push/test' && method === 'POST') {
+    const n = await pushToUser(db, uid, { title: 'Уведомления включены', body: 'Сюда будут приходить статусы заявок и важные новости.', url: '/' }, WEBAPP_URL)
+    return json({ sent: n })
+  }
+
+  /* ----- Face ID: привязка и список ----- */
+  if (path === '/passkeys' && method === 'GET') {
+    const { data } = await db.from('passkeys').select('id, device, created_at, last_used_at').eq('user_id', uid).order('created_at')
+    return json((data ?? []).map((p) => ({ ...p, id: p.id.slice(0, 16) })))
+  }
+  if (path === '/passkeys/register/options' && method === 'POST') {
+    const rp = rpInfo()
+    if (!rp) return fail('Вход по Face ID недоступен', 503)
+    const { data: existing } = await db.from('passkeys').select('id, transports').eq('user_id', uid)
+    if ((existing?.length ?? 0) >= 5) return fail('Можно привязать не больше 5 устройств. Удалите старое.')
+    const options = await generateRegistrationOptions({
+      rpName: 'NEX',
+      rpID: rp.id,
+      userID: enc.encode(String(uid)),
+      userName: user.phone ?? user.username ?? `NEX ${uid}`,
+      userDisplayName: [user.first_name, user.last_name].filter(Boolean).join(' ') || 'NEX',
+      attestationType: 'none',
+      excludeCredentials: (existing ?? []).map((p) => ({ id: p.id, transports: p.transports ?? undefined })),
+      authenticatorSelection: { residentKey: 'required', userVerification: 'required', authenticatorAttachment: 'platform' },
+      timeout: 60_000,
+    })
+    const cid = hex(crypto.getRandomValues(new Uint8Array(16)))
+    await db.from('webauthn_challenges').delete().eq('user_id', uid).eq('kind', 'register')
+    await db.from('webauthn_challenges').insert({ id: cid, user_id: uid, kind: 'register', challenge: options.challenge })
+    return json({ cid, options })
+  }
+  if (path === '/passkeys/register/verify' && method === 'POST') {
+    const rp = rpInfo()
+    const b = await req.json().catch(() => ({}))
+    const { data: ch } = await db.from('webauthn_challenges').delete().eq('id', String(b.cid ?? '')).eq('user_id', uid).eq('kind', 'register').select().maybeSingle()
+    if (!rp || !ch || Date.now() - new Date(ch.created_at).getTime() > 2 * 60_000) return fail('Время ожидания истекло. Попробуйте ещё раз.', 410)
+    let v
+    try {
+      v = await verifyRegistrationResponse({ response: b.response, expectedChallenge: ch.challenge, expectedOrigin: rp.origin, expectedRPID: rp.id, requireUserVerification: true })
+    } catch (e) {
+      console.error('passkey register', e)
+      return fail('Не удалось подключить Face ID')
+    }
+    if (!v.verified || !v.registrationInfo) return fail('Не удалось подключить Face ID')
+    const c = v.registrationInfo.credential
+    await db.from('passkeys').insert({ id: c.id, user_id: uid, public_key: toB64(c.publicKey), counter: c.counter, transports: c.transports ?? null, device: String(b.device ?? '').slice(0, 60) || null })
+    await send(uid, '🔐 Вход по Face ID / Touch ID включён для NEX. Если это были не вы, напишите в поддержку.')
+    return json({ ok: true })
+  }
+  const delPk = path.match(/^\/passkeys\/([A-Za-z0-9_-]{8,})$/)
+  if (delPk && method === 'DELETE') {
+    const { data } = await db.from('passkeys').select('id').eq('user_id', uid)
+    const hitPk = (data ?? []).find((p) => p.id.startsWith(delPk[1]))
+    if (hitPk) await db.from('passkeys').delete().eq('id', hitPk.id).eq('user_id', uid)
+    return json({ ok: true })
   }
 
   if (path === '/alerts' && method === 'GET') {
@@ -1098,6 +1333,7 @@ async function checkAlerts() {
         `🔔 Курс ${a.base}/${a.quote} ${a.direction === 'above' ? 'вырос до' : 'опустился до'} ${nf(r, 4)} (ваша цель ${nf(+a.target, 4)}).`,
         { reply_markup: appButton('Обменять в NEX') },
       )
+      await pushU(a.user_id, `Курс ${a.base}/${a.quote}: ${nf(r, 4)}`, `${a.direction === 'above' ? 'Вырос' : 'Опустился'} до вашей цели ${nf(+a.target, 4)}.`)
       fired++
     }
   }
@@ -1105,6 +1341,8 @@ async function checkAlerts() {
   // чистим старые коды входа
   await db.from('login_codes').delete().lt('created_at', new Date(Date.now() - 86400_000).toISOString())
   await db.from('phone_logins').delete().lt('created_at', new Date(Date.now() - 86400_000).toISOString())
+  await db.from('webauthn_challenges').delete().lt('created_at', new Date(Date.now() - 3600_000).toISOString())
+  await adminCleanup()
   return { checked: data.length, fired }
 }
 
@@ -1132,9 +1370,18 @@ async function setup(origin: string) {
 
 /* ---------------- роутер ---------------- */
 Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
   const url = new URL(req.url)
   const path = url.pathname.replace(/^.*?\/nex(?=\/|$)/, '') || '/'
+  if (path.startsWith('/admin/')) {
+    try {
+      await loadConfig()
+      return await adminApi(req, path)
+    } catch (e) {
+      console.error('admin', e)
+      return new Response(JSON.stringify({ error: 'Ошибка сервера' }), { status: 500, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } })
+    }
+  }
+  if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
   try {
     await loadConfig()
     if (path === '/bot' && req.method === 'POST') {

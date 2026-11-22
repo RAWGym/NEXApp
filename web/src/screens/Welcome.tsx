@@ -3,7 +3,8 @@ import { api, ApiError } from '../lib/api'
 import { Spinner, useToast } from '../components/ui'
 import { openTgLink } from '../lib/tg'
 import { CONFIG, DEMO } from '../config'
-import { IChevLeft, ILock, ITelegram } from '../components/Icons'
+import { IChevLeft, IFace, ILock, ITelegram } from '../components/Icons'
+import { bioAvailable, bioEnabled, bioLogin, bioWith } from '../lib/security'
 
 type Step = 'phone' | 'link' | 'code'
 const SID_KEY = 'nex.login'
@@ -36,6 +37,23 @@ export function Welcome({ onDone }: { onDone: () => void }) {
   const [err, setErr] = useState('')
   const [resendIn, setResendIn] = useState(0)
   const codeRef = useRef<HTMLInputElement>(null)
+  const [bio, setBio] = useState(false)
+  useEffect(() => {
+    if (bioEnabled()) bioAvailable().then(setBio)
+  }, [])
+  const bioIn = async () => {
+    setBusy(true)
+    setErr('')
+    try {
+      await bioLogin()
+      onDone()
+    } catch (e) {
+      const x = e as Error
+      if (!/NotAllowed|Abort|cancel/i.test(x.name + x.message)) setErr(x.message)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   useEffect(() => {
     try {
@@ -184,6 +202,11 @@ export function Welcome({ onDone }: { onDone: () => void }) {
             <button className="btn btn-primary mt16" disabled={!phoneOk || busy} onClick={start}>
               {busy ? <Spinner /> : 'Получить код'}
             </button>
+            {bio && (
+              <button className="btn btn-ghost mt12" disabled={busy} onClick={bioIn}>
+                <IFace size={20} /> Войти {bioWith}
+              </button>
+            )}
             <div className="trust-row mt16">
               <ILock size={14} />
               <span>Двухэтапный вход: номер и одноразовый код в Telegram</span>

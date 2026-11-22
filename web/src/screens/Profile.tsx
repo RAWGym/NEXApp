@@ -1,12 +1,13 @@
 import { useApp } from '../store'
 import { TopBar, useToast } from '../components/ui'
 import { Avatar } from './Home'
-import { IBell, IChat, IChev, IDoc, IInfo, ILogout, IPhone, IQuestion, IShieldCheck, VerifiedBadge, IFlow, ILock, IScale, IId, IGift } from '../components/Icons'
+import { IBell, IChat, IChev, IDoc, IInfo, ILogout, IPhone, IQuestion, IShieldCheck, VerifiedBadge, IFlow, ILock, IScale, IId, IGift, IFace } from '../components/Icons'
 import { TierCard } from './Loyalty'
 import { CONFIG, DEMO } from '../config'
 import { inTelegram, isStandalone, openTgLink } from '../lib/tg'
 import { api } from '../lib/api'
 import { fmtAmount } from '../lib/format'
+import { clearPin } from '../lib/security'
 
 const KYC_TEXT = {
   none: { t: 'Не пройдена', c: 'var(--muted)' },
@@ -60,7 +61,8 @@ export function Profile() {
         />
         <Item icon={<IShieldCheck />} title="Верификация" sub={user?.kyc_status === 'verified' ? `Лимит до ${fmtAmount(CONFIG.maxKztVerified, 'KZT')} ₸ за заявку` : `Для сумм больше ${fmtAmount(CONFIG.maxKzt, 'KZT')} ₸`} right={user?.kyc_status && user.kyc_status !== 'none' ? <span className="xs" style={{ color: ks.c }}>{ks.t}</span> : undefined} onClick={() => push({ name: 'kyc' })} />
         <Item icon={<IGift />} title="Бонусы и приглашения" sub={user?.loyalty ? `${fmtAmount(user.loyalty.bonus_kzt, 'KZT')} ₸ бонусов · друзей: ${user.loyalty.referrals}` : 'Скидки на комиссию'} onClick={() => push({ name: 'loyalty' })} />
-        <Item icon={<IBell />} title="Уведомления о курсе" sub="Сообщим в Telegram" onClick={() => push({ name: 'alerts' })} />
+        {!inTelegram && <Item icon={<IFace />} title="Вход и уведомления" sub="Face ID, код-пароль, push" onClick={() => push({ name: 'security' })} />}
+        <Item icon={<IBell />} title="Уведомления о курсе" sub="Сообщим, когда курс дойдёт до цели" onClick={() => push({ name: 'alerts' })} />
         {!isStandalone && <Item icon={<IPhone />} title="Установить на телефон" sub="NEX как отдельное приложение" onClick={() => push({ name: 'install' })} />}
       </div>
 
@@ -81,6 +83,7 @@ export function Profile() {
             title="Выйти"
             onClick={() => {
               api.logout()
+              clearPin()
               toast('Вы вышли')
               setTimeout(() => location.reload(), 400)
             }}

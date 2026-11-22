@@ -14,12 +14,27 @@ import { DocsList, DocView, Faq, Install } from './screens/Docs'
 import { Alerts } from './screens/Alerts'
 import { Welcome } from './screens/Welcome'
 import { Loyalty, Personal } from './screens/Loyalty'
+import { Security } from './screens/Security'
+import { LockScreen, PushPrompt } from './components/Lock'
+import { lockEnabled, syncPush } from './lib/security'
 import { api } from './lib/api'
 import { haptic, inTelegram, setBackButton, tgInit } from './lib/tg'
 
 export default function App() {
   const [state, setState] = useState<'loading' | 'login' | 'ready' | 'error'>('loading')
   const [err, setErr] = useState('')
+  // Замок приложения (код-пароль или Face ID): при запуске и после минуты в фоне
+  const [locked, setLocked] = useState(() => !inTelegram && api.hasSession() && lockEnabled())
+  useEffect(() => {
+    if (inTelegram) return
+    let hiddenAt = 0
+    const onVis = () => {
+      if (document.visibilityState === 'hidden') hiddenAt = Date.now()
+      else if (hiddenAt && Date.now() - hiddenAt > 60_000 && api.hasSession() && lockEnabled()) setLocked(true)
+    }
+    document.addEventListener('visibilitychange', onVis)
+    return () => document.removeEventListener('visibilitychange', onVis)
+  }, [])
 
   useEffect(() => {
     tgInit()
@@ -27,6 +42,7 @@ export default function App() {
       try {
         if (inTelegram) await api.authTelegram()
         setState(api.hasSession() ? 'ready' : 'login')
+        if (api.hasSession()) syncPush()
       } catch (e) {
         setErr((e as Error).message)
         setState('error')
@@ -50,12 +66,14 @@ export default function App() {
           </button>
         </div>
       )}
-      {state === 'login' && <Welcome onDone={() => setState('ready')} />}
+      {state === 'login' && <Welcome onDone={() => (setLocked(false), setState('ready'))} />}
       {state === 'ready' && (
         <AppProvider>
           <Shell />
+          {!locked && !inTelegram && <PushPrompt />}
         </AppProvider>
       )}
+      {state === 'ready' && locked && <LockScreen onUnlock={() => setLocked(false)} />}
     </ToastProvider>
   )
 }
@@ -83,6 +101,16 @@ function Shell() {
     if (m) push({ name: 'order', id: Number(m[1]) })
     if (p === 'kyc') push({ name: 'kyc' })
     if (p === 'loyalty') push({ name: 'loyalty' })
+    // Нажатие на уведомление, когда приложение уже открыто
+    const onMsg = (e: MessageEvent) => {
+      if (e.data?.type !== 'open') return
+      const sp = new URLSearchParams(String(e.data.url).split('?')[1] ?? '').get('startapp') ?? ''
+      const om = /^order_(\d+)$/.exec(sp)
+      if (om) push({ name: 'order', id: Number(om[1]) })
+      else if (sp === 'kyc' || sp === 'loyalty') push({ name: sp })
+    }
+    navigator.serviceWorker?.addEventListener('message', onMsg)
+    return () => navigator.serviceWorker?.removeEventListener('message', onMsg)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -99,6 +127,7 @@ function Shell() {
       case 'install': content = <Install />; break
       case 'loyalty': content = <Loyalty />; break
       case 'personal': content = <Personal />; break
+      case 'security': content = <Security />; break
     }
   } else {
     content = { home: <Home />, exchange: <Exchange />, rates: <Rates />, history: <History />, profile: <Profile /> }[tab]

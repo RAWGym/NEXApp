@@ -1,83 +1,46 @@
-import { useEffect, useState } from 'react'
+import { useRef, useState } from 'react'
 import { useApp } from '../store'
-import { Spinner, TopBar, useToast } from '../components/ui'
+import { TopBar, useToast } from '../components/ui'
 import { ProfileForm } from '../components/ProfileForm'
-import { preloadOcr, readMrz } from '../lib/ocr'
-import { matchFaces, preloadFace, type FaceMatch } from '../lib/facematch'
-import { namesMatch, type MrzResult } from '../lib/mrz'
 import { ICheck, IChev, IClock, IDoc, IShieldCheck, IUser, VerifiedBadge, IFace, ILock } from '../components/Icons'
-import { DocScanner } from '../components/DocScanner'
-import { FaceScan } from '../components/FaceScan'
+import { compressFile } from '../lib/camera'
 import { api, type DocType, type KycForm } from '../lib/api'
 import { haptic } from '../lib/tg'
 import { DEMO } from '../config'
 
-const DOCS: { id: DocType; title: string; sub: string; aspect: number; back: boolean }[] = [
-  { id: 'id_card', title: 'Удостоверение личности', sub: 'Лицевая и оборотная сторона', aspect: 1.586, back: true },
-  { id: 'passport', title: 'Паспорт', sub: 'Страница с фотографией', aspect: 1.42, back: false },
-  { id: 'residence', title: 'Вид на жительство', sub: 'Лицевая и оборотная сторона', aspect: 1.586, back: true },
+const DOCS: { id: DocType; title: string; sub: string; back: boolean; num: string }[] = [
+  { id: 'id_card', title: 'Удостоверение личности', sub: 'Лицевая и оборотная сторона', back: true, num: '9 цифр, например 012345678' },
+  { id: 'passport', title: 'Паспорт', sub: 'Разворот с фотографией', back: false, num: 'Например N12345678' },
+  { id: 'residence', title: 'Вид на жительство', sub: 'Лицевая и оборотная сторона', back: true, num: 'Номер с лицевой стороны' },
 ]
+const COUNTRIES = ['Казахстан', 'Россия', 'Узбекистан', 'Кыргызстан', 'Таджикистан', 'Беларусь', 'Армения', 'Азербайджан', 'Грузия', 'Туркменистан', 'Украина', 'Китай', 'Турция']
+const ISSUERS = ['МВД РК', 'МЮ РК', 'МВД России', 'Другой орган']
 
 const EMPTY: KycForm = {
   doc_type: 'id_card',
-  files: {},
-  liveness: { passed: false, steps: [], method: '' },
+  doc_number: '',
+  personal_number: '',
+  issue_date: '',
+  expiry_date: '',
+  issued_by: '',
+  citizenship: 'Казахстан',
+  birth_place: '',
   address: '',
+  files: {},
 }
 
-type Scan = null | 'doc_front' | 'doc_back' | 'face'
-type Ocr = { state: 'idle' | 'reading' | 'done' | 'failed'; mrz: MrzResult | null }
-type Match = { state: 'idle' | 'running' | 'done' | 'failed'; r: FaceMatch | null }
 
 export function Kyc() {
   const { user, setUser, pop, push, refreshUser } = useApp()
   const toast = useToast()
   const [f, setF] = useState<KycForm>(EMPTY)
+  const [issuerOther, setIssuerOther] = useState(false)
   const [step, setStep] = useState(0)
-  const [scan, setScan] = useState<Scan>(null)
   const [agree, setAgree] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [ocr, setOcr] = useState<Ocr>({ state: 'idle', mrz: null })
-  const [manual, setManual] = useState(false)
-  const [match, setMatch] = useState<Match>({ state: 'idle', r: null })
-  const set = (k: keyof KycForm) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setF({ ...f, [k]: e.target.value })
+  const [touched, setTouched] = useState(false)
   const doc = DOCS.find((d) => d.id === f.doc_type)!
-  const mrzSide: 'doc_front' | 'doc_back' = doc.back ? 'doc_back' : 'doc_front'
-
-  // Модели распознавания загружаются заранее, пока человек читает экран
-  useEffect(() => {
-    if (step === 1) preloadOcr().catch(() => {})
-    if (step === 2) preloadFace().catch(() => {})
-  }, [step])
-
-  const runOcr = async (img: string) => {
-    setOcr({ state: 'reading', mrz: null })
-    try {
-      const mrz = await readMrz(img)
-      if (mrz?.valid) {
-        haptic('success')
-        setOcr({ state: 'done', mrz })
-        setManual(false)
-      } else {
-        haptic('error')
-        setOcr({ state: 'failed', mrz })
-      }
-    } catch {
-      setOcr({ state: 'failed', mrz: null })
-    }
-  }
-
-  const runMatch = async (face: string, docImg?: string) => {
-    if (!docImg) return
-    setMatch({ state: 'running', r: null })
-    try {
-      const r = await matchFaces(face, docImg)
-      setMatch({ state: r ? 'done' : 'failed', r })
-      if (r?.docFace) setF((p) => ({ ...p, files: { ...p.files, doc_face: r.docFace } }))
-    } catch {
-      setMatch({ state: 'failed', r: null })
-    }
-  }
+  const set = (k: keyof KycForm) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setF({ ...f, [k]: e.target.value })
 
   const status = user?.kyc_status ?? 'none'
   if (status === 'verified' || status === 'pending') {
@@ -100,7 +63,7 @@ export function Kyc() {
         </button>
         {DEMO && status === 'pending' && (
           <div className="demo-bar">
-            Демо-режим: действия оператора в боте.
+            Демо-режим: действия оператора.
             <div className="row">
               <button onClick={() => (api.demoKyc('verified'), refreshUser())}>Одобрить</button>
               <button onClick={() => (api.demoKyc('rejected'), refreshUser())}>Отклонить</button>
@@ -111,46 +74,34 @@ export function Kyc() {
     )
   }
 
-  const mrz = ocr.mrz?.valid ? ocr.mrz : null
-  const data = {
-    full_name: user?.full_name ?? '',
-    latin: mrz ? `${mrz.surname} ${mrz.given_names}` : '',
-    birth_date: mrz?.birth_date || f.birth_date || '',
-    doc_number: mrz?.doc_number || f.doc_number || '',
-    expiry: mrz?.expiry_date || f.expiry_date || '',
-    citizenship: mrz?.nationality || f.citizenship || '',
-    personal: mrz?.personal_number || '',
+  // Проверка полей прямо при вводе
+  const today = new Date().toISOString().slice(0, 10)
+  const kz = f.citizenship === 'Казахстан'
+  const iin = (f.personal_number ?? '').replace(/\D/g, '')
+  const errs: Partial<Record<keyof KycForm, string>> = {}
+  const num = (f.doc_number ?? '').trim()
+  if (num.length < 5) errs.doc_number = 'Введите номер документа'
+  else if (f.doc_type === 'id_card' && kz && !/^\d{9}$/.test(num)) errs.doc_number = 'У удостоверения РК 9 цифр'
+  if (kz) {
+    if (iin.length !== 12) errs.personal_number = 'ИИН состоит из 12 цифр'
+    else if (!iinValid(iin)) errs.personal_number = 'ИИН введён с ошибкой, проверьте цифры'
+    else if (user?.birth_date && iinBirth(iin) !== user.birth_date) errs.personal_number = 'ИИН не совпадает с датой рождения в личных данных'
   }
-  const docsScanned = !!f.files.doc_front && (!doc.back || !!f.files.doc_back)
-  const step1Ok = docsScanned && (!!mrz || (manual && data.doc_number.length >= 5 && !!data.birth_date && !!data.expiry))
-  const step2Ok = !!f.files.face && match.state !== 'running'
-
-  const checks: { label: string; ok: boolean | null; note?: string }[] = [
-    { label: 'Данные считаны с документа', ok: !!mrz, note: mrz ? undefined : 'введены вручную' },
-    { label: 'Контрольные цифры документа', ok: mrz ? mrz.valid : null },
-    { label: 'Документ действителен', ok: data.expiry ? new Date(data.expiry).getTime() > Date.now() : null },
-    { label: 'Возраст 18+', ok: data.birth_date ? age(data.birth_date) >= 18 : null },
-    { label: 'ФИО совпадает с анкетой', ok: mrz && user?.full_name ? namesMatch(user.full_name, mrz) : null },
-    { label: 'Дата рождения совпадает с анкетой', ok: user?.birth_date && data.birth_date ? user.birth_date === data.birth_date : null },
-    { label: 'Живое лицо', ok: f.files.face ? f.liveness.passed : null },
-    { label: 'Лицо совпадает с фото в документе', ok: match.r ? match.r.passed : match.state === 'failed' ? null : null, note: match.r ? `сходство ${Math.round(match.r.score * 100)}%` : match.state === 'failed' ? 'не удалось сравнить' : undefined },
-  ]
-  const allOk = checks.every((c) => c.ok === true)
+  if (!f.issue_date) errs.issue_date = 'Укажите дату выдачи'
+  else if (f.issue_date > today) errs.issue_date = 'Дата выдачи не может быть в будущем'
+  if (!f.expiry_date) errs.expiry_date = 'Укажите срок действия'
+  else if (f.expiry_date <= today) errs.expiry_date = 'Срок действия документа истёк'
+  else if (f.issue_date && f.expiry_date <= f.issue_date) errs.expiry_date = 'Срок действия раньше даты выдачи'
+  if ((f.issued_by ?? '').trim().length < 2) errs.issued_by = 'Укажите, кем выдан документ'
+  if (!f.citizenship?.trim()) errs.citizenship = 'Укажите гражданство'
+  if ((f.address ?? '').trim().length < 5) errs.address = 'Укажите город и адрес'
+  const step1Ok = Object.keys(errs).length === 0
+  const step2Ok = !!f.files.doc_front && (!doc.back || !!f.files.doc_back) && !!f.files.selfie
 
   const submit = async () => {
     setBusy(true)
     try {
-      const body: KycForm = {
-        ...f,
-        mrz_lines: mrz?.lines,
-        full_name: user?.full_name ?? '',
-        birth_date: data.birth_date,
-        doc_number: data.doc_number,
-        expiry_date: data.expiry,
-        citizenship: data.citizenship,
-        face_match: match.r ? { score: match.r.score, passed: match.r.passed } : null,
-      }
-      const u = await api.submitKyc(body)
+      const u = await api.submitKyc({ ...f, personal_number: iin || f.personal_number, doc_number: num })
       setUser(u)
       haptic('success')
       toast('Документы отправлены на проверку')
@@ -163,14 +114,15 @@ export function Kyc() {
   }
 
   const back = () => (step > 0 ? setStep(step - 1) : pop())
-  const STEPS = ['Документ', 'Лицо', 'Отправка']
+  const STEPS = ['Данные', 'Фото', 'Отправка']
+  const err = (k: keyof KycForm) => (touched || (f[k] as string)) && errs[k] ? errs[k] : undefined
 
   return (
     <div className="screen sub">
       <TopBar title="Верификация" onBack={back} />
 
       {step > 0 && (
-        <div className="wizard">
+        <div className="wizard" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
           {STEPS.map((s, i) => (
             <div key={s} className={`wz ${i + 1 < step ? 'done' : i + 1 === step ? 'cur' : ''}`}>
               <span />
@@ -191,17 +143,17 @@ export function Kyc() {
             <div className="card hero-soft" style={{ textAlign: 'center', padding: '28px 18px' }}>
               <div className="glow-icon"><IShieldCheck size={46} /></div>
               <div style={{ fontSize: 20, fontWeight: 600, marginTop: 14 }}>Подтвердите документ</div>
-              <p className="small muted" style={{ margin: '8px 0 0' }}>Около 2 минут. Ничего не нужно вводить: данные считаются с документа автоматически. После проверки лимит до 5 000 000 ₸ и отметка «Подтверждён».</p>
+              <p className="small muted" style={{ margin: '8px 0 0' }}>Около 3 минут. После проверки лимит обмена до 5 000 000 ₸ и отметка «Подтверждён».</p>
             </div>
             <div className="list mt12 stagger">
               <Row icon={<IUser />} t="Личные данные" s={user?.profile_done ? `${user.full_name}` : 'ФИО, телефон, дата рождения'} done={!!user?.profile_done} />
-              <Row icon={<IDoc />} t="Скан документа" s="Удостоверение, паспорт или ВНЖ" />
-              <Row icon={<IFace />} t="Сканирование лица" s="Повернуть голову и моргнуть" />
+              <Row icon={<IDoc />} t="Данные документа" s="Номер, ИИН, кем и когда выдан, срок действия" />
+              <Row icon={<IFace />} t="Фото документа и селфи с ним" s="Документ рядом с лицом, данные читаемы" />
             </div>
             <div className="card mt12 row small muted" style={{ alignItems: 'flex-start' }}>
               <ILock size={20} style={{ flex: 'none', marginTop: 1 }} />
               <div>
-                Распознавание документа и лица идёт на вашем телефоне. На сервер уходят только снимки и итог проверки, они шифруются (AES-256).{' '}
+                Данные и фото шифруются (AES-256) и хранятся на защищённых серверах в ЕС (Германия). Доступ есть только у сотрудников, проверяющих анкеты.{' '}
                 <a href="#" onClick={(e) => (e.preventDefault(), push({ name: 'doc', id: 'security' }))}>Подробнее</a>
               </div>
             </div>
@@ -221,15 +173,7 @@ export function Kyc() {
             <h2 className="section" style={{ marginTop: 6 }}>Какой документ</h2>
             <div className="list">
               {DOCS.map((d) => (
-                <button
-                  key={d.id}
-                  className={`list-item pick ${f.doc_type === d.id ? 'on' : ''}`}
-                  onClick={() => {
-                    setF({ ...f, doc_type: d.id, files: { face: f.files.face } })
-                    setOcr({ state: 'idle', mrz: null })
-                    setMatch({ state: 'idle', r: null })
-                  }}
-                >
+                <button key={d.id} className={`list-item pick ${f.doc_type === d.id ? 'on' : ''}`} onClick={() => setF({ ...f, doc_type: d.id, files: { selfie: f.files.selfie } })}>
                   <div className="radio" />
                   <div className="grow">
                     <div className="title">{d.title}</div>
@@ -238,133 +182,101 @@ export function Kyc() {
                 </button>
               ))}
             </div>
-            <div className="scan-tiles mt16">
-              <ScanTile label={doc.back ? 'Лицевая сторона' : 'Страница с фото'} img={f.files.doc_front} reading={mrzSide === 'doc_front' && ocr.state === 'reading'} onClick={() => setScan('doc_front')} />
-              {doc.back && <ScanTile label="Оборотная сторона" img={f.files.doc_back} reading={ocr.state === 'reading'} onClick={() => setScan('doc_back')} />}
+
+            <h2 className="section">Данные документа</h2>
+            <div className="card" style={{ padding: '6px 16px' }}>
+              <div className="kv"><span className="k">ФИО</span><span className="v">{user?.full_name}</span></div>
+              <div className="kv"><span className="k">Дата рождения</span><span className="v">{ru(user?.birth_date)}</span></div>
             </div>
-            <p className="xs faint" style={{ margin: '10px 4px 0' }}>
-              Положите документ на тёмную ровную поверхность. Когда он в рамке и резкий, снимок сделается сам.{' '}
-              {doc.back ? 'Данные считываются со строк с символами <<< на обороте.' : 'Данные считываются со строк с символами <<< внизу страницы.'}
+            <p className="xs faint" style={{ margin: '6px 4px 0' }}>
+              Должны совпадать с документом. Ошибка?{' '}
+              <a href="#" onClick={(e) => (e.preventDefault(), push({ name: 'personal' }))}>Исправить</a>
             </p>
 
-            {ocr.state === 'reading' && (
-              <div className="card mt12 row pop-in" style={{ gap: 12 }}>
-                <Spinner />
-                <div className="small">Считываем данные с документа…</div>
-              </div>
-            )}
-            {mrz && (
-              <div className="card mt12 ocr-card pop-in">
-                <div className="row small" style={{ gap: 8, color: 'var(--green)', fontWeight: 600 }}>
-                  <ICheck size={16} strokeWidth={2.6} /> Данные считаны и проверены
-                </div>
-                <div className="kv"><span className="k">Имя латиницей</span><span className="v">{data.latin}</span></div>
-                <div className="kv"><span className="k">Дата рождения</span><span className="v">{ru(data.birth_date)}</span></div>
-                <div className="kv"><span className="k">Номер документа</span><span className="v">{data.doc_number}</span></div>
-                <div className="kv"><span className="k">Действителен до</span><span className="v">{ru(data.expiry)}</span></div>
-                <div className="kv"><span className="k">Гражданство</span><span className="v">{data.citizenship}</span></div>
-                {data.personal && <div className="kv"><span className="k">ИИН</span><span className="v">{data.personal}</span></div>}
-              </div>
-            )}
-            {ocr.state === 'failed' && !manual && (
-              <div className="card mt12 notice pop-in small">
-                Не получилось считать строки с символами &lt;&lt;&lt;. Переснимите {doc.back ? 'оборотную сторону' : 'страницу с фото'} ближе, без бликов и при хорошем свете.
-                <button className="link-btn mt8" onClick={() => setManual(true)}>Ввести данные вручную</button>
-              </div>
-            )}
-            {manual && !mrz && (
-              <div className="pop-in">
-                <Field label="Номер документа">
-                  <input className="input" value={f.doc_number ?? ''} onChange={set('doc_number')} placeholder="012345678" autoComplete="off" />
-                </Field>
-                <div className="grid2">
-                  <Field label="Дата рождения">
-                    <input className="input" type="date" value={f.birth_date ?? user?.birth_date ?? ''} onChange={set('birth_date')} max={maxBirth()} />
-                  </Field>
-                  <Field label="Действителен до">
-                    <input className="input" type="date" value={f.expiry_date ?? ''} onChange={set('expiry_date')} />
-                  </Field>
-                </div>
-                <Field label="Гражданство">
-                  <input className="input" value={f.citizenship ?? ''} onChange={set('citizenship')} placeholder="Казахстан" />
-                </Field>
-                <p className="xs faint" style={{ margin: '6px 4px 0' }}>Анкету с ручным вводом оператор проверит внимательнее, это может занять больше времени.</p>
-              </div>
-            )}
-            <button className="btn btn-primary mt16" disabled={!step1Ok} onClick={() => setStep(2)}>Далее</button>
+            <Field label="Гражданство" err={err('citizenship')}>
+              <input className="input" list="kyc-countries" value={f.citizenship ?? ''} onChange={set('citizenship')} placeholder="Казахстан" autoComplete="country-name" />
+              <datalist id="kyc-countries">{COUNTRIES.map((c) => <option key={c} value={c} />)}</datalist>
+            </Field>
+            <Field label="Номер документа" err={err('doc_number')}>
+              <input className="input" value={f.doc_number ?? ''} onChange={(e) => setF({ ...f, doc_number: e.target.value.toUpperCase().replace(/[^A-ZА-Я0-9]/g, '').slice(0, 20) })} placeholder={doc.num} autoComplete="off" inputMode={f.doc_type === 'id_card' ? 'numeric' : 'text'} />
+            </Field>
+            <Field label={kz ? 'ИИН' : 'Личный номер (если есть в документе)'} err={err('personal_number')}>
+              <input className="input" value={f.personal_number ?? ''} onChange={(e) => setF({ ...f, personal_number: e.target.value.replace(/[^0-9A-Za-z]/g, '').slice(0, 20) })} placeholder={kz ? '12 цифр' : 'Необязательно'} inputMode={kz ? 'numeric' : 'text'} autoComplete="off" />
+            </Field>
+            <Field label="Кем выдан" err={err('issued_by')}>
+              {issuerOther ? (
+                <input className="input" value={f.issued_by ?? ''} onChange={set('issued_by')} placeholder="Орган, выдавший документ" autoFocus />
+              ) : (
+                <select
+                  className="input"
+                  value={f.issued_by ?? ''}
+                  onChange={(e) => (e.target.value === 'Другой орган' ? (setIssuerOther(true), setF({ ...f, issued_by: '' })) : setF({ ...f, issued_by: e.target.value }))}
+                >
+                  <option value="" disabled>Выберите</option>
+                  {ISSUERS.map((i) => <option key={i}>{i}</option>)}
+                </select>
+              )}
+            </Field>
+            <div className="grid2">
+              <Field label="Дата выдачи" err={err('issue_date')}>
+                <input className="input" type="date" value={f.issue_date ?? ''} onChange={set('issue_date')} max={today} />
+              </Field>
+              <Field label="Действителен до" err={err('expiry_date')}>
+                <input className="input" type="date" value={f.expiry_date ?? ''} onChange={set('expiry_date')} min={today} />
+              </Field>
+            </div>
+            <Field label="Место рождения (необязательно)">
+              <input className="input" value={f.birth_place ?? ''} onChange={set('birth_place')} placeholder="Как в документе" />
+            </Field>
+            <Field label="Адрес проживания" err={err('address')}>
+              <input className="input" value={f.address ?? ''} onChange={set('address')} placeholder="Алматы, ул. Абая 1, кв. 5" autoComplete="street-address" />
+            </Field>
+            <button className="btn btn-primary mt16" onClick={() => (step1Ok ? setStep(2) : (setTouched(true), haptic('error')))}>Далее</button>
           </>
         )}
 
         {step === 2 && (
           <>
-            <div className="card hero-soft" style={{ textAlign: 'center', padding: '26px 18px' }}>
-              {f.files.face ? (
-                <div className="face-thumb pop-in"><img src={f.files.face} alt="" /><span><ICheck size={16} strokeWidth={3} /></span></div>
-              ) : (
-                <div className="glow-icon"><IFace size={50} /></div>
-              )}
-              <div style={{ fontSize: 19, fontWeight: 600, marginTop: 14 }}>{f.files.face ? 'Лицо отсканировано' : 'Сканирование лица'}</div>
-              <p className="small muted" style={{ margin: '8px 0 0' }}>
-                {f.files.face
-                  ? match.state === 'running'
-                    ? 'Сравниваем с фото в документе…'
-                    : match.r
-                      ? match.r.passed
-                        ? `Лицо совпадает с фото в документе (сходство ${Math.round(match.r.score * 100)}%).`
-                        : 'Лицо плохо совпадает с фото в документе. Переснимите при хорошем свете или продолжите: оператор проверит вручную.'
-                      : 'Не удалось найти лицо на фото документа. Оператор сверит вручную.'
-                  : 'Камера попросит повернуть голову и моргнуть. Это защищает от подмены фотографией.'}
-              </p>
+            <h2 className="section" style={{ marginTop: 6 }}>{doc.title}</h2>
+            <div className="scan-tiles">
+              <PhotoTile label={doc.back ? 'Лицевая сторона' : 'Разворот с фото'} img={f.files.doc_front} onPick={(img) => setF((p) => ({ ...p, files: { ...p.files, doc_front: img } }))} />
+              {doc.back && <PhotoTile label="Оборотная сторона" img={f.files.doc_back} onPick={(img) => setF((p) => ({ ...p, files: { ...p.files, doc_back: img } }))} />}
+            </div>
+            <p className="xs faint" style={{ margin: '10px 4px 0' }}>Документ целиком, без бликов и пальцев на данных. Все надписи должны читаться.</p>
+
+            <h2 className="section">Селфи с документом</h2>
+            <div className="scan-tiles" style={{ gridTemplateColumns: '1fr' }}>
+              <PhotoTile label="Сделать селфи" img={f.files.selfie} selfie tall onPick={(img) => setF((p) => ({ ...p, files: { ...p.files, selfie: img } }))} />
             </div>
             <ul className="tips small muted">
-              <li>Хорошее освещение, без яркого света за спиной</li>
-              <li>Снимите очки, головной убор и маску</li>
-              <li>Держите телефон на уровне глаз</li>
+              <li>Держите документ разворотом с фото рядом с лицом</li>
+              <li>Лицо и фото в документе должны быть хорошо видны</li>
+              <li>Без очков, головного убора и маски, при хорошем свете</li>
             </ul>
-            {f.files.face ? (
-              <div className="row mt16" style={{ gap: 10 }}>
-                <button className="btn btn-ghost" onClick={() => setScan('face')}>Переснять</button>
-                <button className="btn btn-primary" disabled={!step2Ok} onClick={() => setStep(3)}>Далее</button>
-              </div>
-            ) : (
-              <button className="btn btn-primary mt16" onClick={() => setScan('face')}>Начать сканирование</button>
-            )}
+            <button className="btn btn-primary mt16" disabled={!step2Ok} onClick={() => setStep(3)}>Далее</button>
           </>
         )}
 
         {step === 3 && (
           <>
-            <div className={`card verdict ${allOk ? 'ok' : 'warn'} rise`}>
-              <div className="verdict-icon">{allOk ? <ICheck size={22} strokeWidth={2.6} /> : <IClock size={22} />}</div>
-              <div>
-                <div style={{ fontWeight: 600 }}>{allOk ? 'Автоматическая сверка пройдена' : 'Часть проверок не пройдена'}</div>
-                <div className="xs muted">{allOk ? 'Осталось подтверждение оператора, обычно быстро.' : 'Можно отправить: оператор проверит вручную.'}</div>
-              </div>
-            </div>
-            <div className="card mt12 checks stagger">
-              {checks.map((c) => (
-                <div key={c.label} className="check-row">
-                  <span className={`ck ${c.ok === true ? 'y' : c.ok === false ? 'n' : 'q'}`}>{c.ok === true ? '✓' : c.ok === false ? '✕' : '?'}</span>
-                  <span className="grow small">{c.label}</span>
-                  {c.note && <span className="xs faint">{c.note}</span>}
-                </div>
-              ))}
-            </div>
-            <h2 className="section">Данные</h2>
+            <h2 className="section" style={{ marginTop: 6 }}>Проверьте данные</h2>
             <div className="card" style={{ padding: '6px 16px' }}>
-              <div className="kv"><span className="k">ФИО</span><span className="v">{data.full_name}</span></div>
-              <div className="kv"><span className="k">Дата рождения</span><span className="v">{ru(data.birth_date)}</span></div>
-              <div className="kv"><span className="k">Документ</span><span className="v">{doc.title}, № {data.doc_number}</span></div>
-              <div className="kv"><span className="k">Действителен до</span><span className="v">{ru(data.expiry)}</span></div>
+              <div className="kv"><span className="k">ФИО</span><span className="v">{user?.full_name}</span></div>
+              <div className="kv"><span className="k">Дата рождения</span><span className="v">{ru(user?.birth_date)}</span></div>
+              <div className="kv"><span className="k">Гражданство</span><span className="v">{f.citizenship}</span></div>
+              <div className="kv"><span className="k">Документ</span><span className="v">{doc.title}, № {num}</span></div>
+              {iin && <div className="kv"><span className="k">{kz ? 'ИИН' : 'Личный номер'}</span><span className="v">{iin || f.personal_number}</span></div>}
+              <div className="kv"><span className="k">Кем выдан</span><span className="v">{f.issued_by}</span></div>
+              <div className="kv"><span className="k">Дата выдачи</span><span className="v">{ru(f.issue_date)}</span></div>
+              <div className="kv"><span className="k">Действителен до</span><span className="v">{ru(f.expiry_date)}</span></div>
+              {f.birth_place && <div className="kv"><span className="k">Место рождения</span><span className="v">{f.birth_place}</span></div>}
+              <div className="kv"><span className="k">Адрес</span><span className="v">{f.address}</span></div>
               <div className="kv"><span className="k">Телефон</span><span className="v">{user?.phone}</span></div>
             </div>
-            <Field label="Город и адрес проживания (необязательно)">
-              <input className="input" value={f.address ?? ''} onChange={set('address')} placeholder="Алматы, ул. Абая 1" />
-            </Field>
             <div className="thumbs mt12">
               {f.files.doc_front && <img src={f.files.doc_front} alt="" />}
               {f.files.doc_back && <img src={f.files.doc_back} alt="" />}
-              {f.files.face && <img src={f.files.face} alt="" className="round" />}
+              {f.files.selfie && <img src={f.files.selfie} alt="" />}
             </div>
             <label className="check">
               <input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} />
@@ -380,32 +292,6 @@ export function Kyc() {
           </>
         )}
       </div>
-
-      {(scan === 'doc_front' || scan === 'doc_back') && (
-        <DocScanner
-          title={doc.title}
-          hint={scan === 'doc_back' ? 'Оборотная сторона' : doc.back ? 'Лицевая сторона' : 'Страница с фотографией'}
-          aspect={doc.aspect}
-          onClose={() => setScan(null)}
-          onDone={(img) => {
-            const side = scan
-            setF((p) => ({ ...p, files: { ...p.files, [side]: img } }))
-            setScan(null)
-            if (side === mrzSide) runOcr(img)
-            if (side === 'doc_front' && f.files.face) runMatch(f.files.face, img)
-          }}
-        />
-      )}
-      {scan === 'face' && (
-        <FaceScan
-          onClose={() => setScan(null)}
-          onDone={(r) => {
-            setF((p) => ({ ...p, files: { ...p.files, face: r.image }, liveness: r.liveness }))
-            setScan(null)
-            runMatch(r.image, f.files.doc_front)
-          }}
-        />
-      )}
     </div>
   )
 }
@@ -433,24 +319,61 @@ function Field({ label, err, children }: { label: string; err?: string; children
   )
 }
 
-function ScanTile({ label, img, onClick, reading }: { label: string; img?: string; onClick: () => void; reading?: boolean }) {
+/** Фото с камеры или из галереи. Селфи открывает фронтальную камеру. */
+function PhotoTile({ label, img, onPick, selfie, tall }: { label: string; img?: string; onPick: (img: string) => void; selfie?: boolean; tall?: boolean }) {
+  const ref = useRef<HTMLInputElement>(null)
+  const toast = useToast()
+  const [busy, setBusy] = useState(false)
   return (
-    <button className={`scan-tile ${img ? 'has' : ''} ${reading && img ? 'reading' : ''}`} onClick={onClick}>
-      {img ? <img src={img} alt="" /> : <IDoc size={28} />}
-      <span>{img ? 'Переснять' : label}</span>
+    <>
+    <button className={`scan-tile ${img ? 'has' : ''}`} style={tall ? { height: 200 } : undefined} onClick={() => ref.current?.click()} disabled={busy}>
+      {img ? <img src={img} alt="" /> : selfie ? <IFace size={30} /> : <IDoc size={28} />}
+      <span>{busy ? 'Обработка…' : img ? 'Переснять' : label}</span>
       {img && <i><ICheck size={14} strokeWidth={3} /></i>}
     </button>
+      <input
+        ref={ref}
+        type="file"
+        accept="image/jpeg,image/png,image/webp,image/heic,image/heif"
+        {...(selfie ? { capture: 'user' as const } : {})}
+        hidden
+        onChange={async (e) => {
+          const file = e.target.files?.[0]
+          e.target.value = ''
+          if (!file) return
+          if (file.size > 25_000_000) return toast('Файл слишком большой')
+          setBusy(true)
+          try {
+            onPick(await compressFile(file, 1800))
+            haptic('success')
+          } catch {
+            toast('Не удалось открыть фото. Попробуйте сделать снимок ещё раз.')
+          } finally {
+            setBusy(false)
+          }
+        }}
+      />
+    </>
   )
 }
 
-function ru(d?: string) {
+function ru(d?: string | null) {
   return d ? d.split('-').reverse().join('.') : ''
 }
-function age(d: string) {
-  return (Date.now() - new Date(d).getTime()) / (365.25 * 86400_000)
+/** Контрольный разряд ИИН РК */
+function iinValid(s: string) {
+  if (!/^\d{12}$/.test(s)) return false
+  const d = s.split('').map(Number)
+  let c = d.slice(0, 11).reduce((a, x, i) => a + x * (i + 1), 0) % 11
+  if (c === 10) {
+    c = d.slice(0, 11).reduce((a, x, i) => a + x * (((i + 2) % 11) + 1), 0) % 11
+    if (c === 10) return false
+  }
+  return c === d[11]
 }
-function maxBirth() {
-  const d = new Date()
-  d.setFullYear(d.getFullYear() - 18)
-  return d.toISOString().slice(0, 10)
+/** Дата рождения из ИИН: ГГММДД и век из 7-й цифры */
+function iinBirth(s: string) {
+  const c = +s[6]
+  const century = c <= 2 ? 1800 : c <= 4 ? 1900 : 2000
+  return `${century + +s.slice(0, 2)}-${s.slice(2, 4)}-${s.slice(4, 6)}`
 }

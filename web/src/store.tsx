@@ -15,6 +15,7 @@ export type Route =
   | { name: 'install' }
   | { name: 'loyalty' }
   | { name: 'personal' }
+  | { name: 'security' }
 
 interface Ctx {
   user: User | null

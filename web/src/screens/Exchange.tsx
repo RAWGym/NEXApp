@@ -353,7 +353,7 @@ export function Exchange() {
 
       <Sheet open={needKyc} onClose={() => setNeedKyc(false)} title="Подтвердите документ">
         <p className="small muted" style={{ margin: '0 4px 16px' }}>
-          Для обмена больше {fmtAmount(CONFIG.maxKzt, 'KZT')} ₸ нужна проверка документа: скан удостоверения, паспорта или ВНЖ и сканирование лица. Данные заполнятся сами.
+          Для обмена больше {fmtAmount(CONFIG.maxKzt, 'KZT')} ₸ нужна проверка документа: данные и фото удостоверения, паспорта или ВНЖ и селфи с документом. Около 3 минут.
         </p>
         <button className="btn btn-primary" onClick={() => (setNeedKyc(false), push({ name: 'kyc' }))}>Пройти проверку</button>
       </Sheet>
