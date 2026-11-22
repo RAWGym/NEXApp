@@ -40,7 +40,7 @@ export function Rates() {
             <span style={{ width: 80, textAlign: 'right' }}>Покупка</span>
             <span style={{ width: 80, textAlign: 'right' }}>Продажа</span>
           </div>
-          <div className="list mt8">
+          <div className="list mt8 stagger">
             {[...FIAT, CRYPTO[0]]
               .filter((c) => c.code !== base)
               .map((c) => {
@@ -68,7 +68,7 @@ export function Rates() {
             <span className="grow">Монета</span>
             <span>Цена, 24ч</span>
           </div>
-          <div className="list mt8">
+          <div className="list mt8 stagger">
             {CRYPTO.map((c) => {
               const ch = market.change24h[c.code]
               return (

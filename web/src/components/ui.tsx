@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom'
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 import { cur } from '../lib/currencies'
 import type { OrderStatus } from '../lib/api'
@@ -37,14 +38,16 @@ export function Sheet({ open, onClose, title, children }: { open: boolean; onClo
     }
   }, [open])
   if (!open) return null
-  return (
+  // Через портал: лист всегда поверх нижней панели, независимо от анимаций экрана
+  return createPortal(
     <div className="sheet-wrap" onClick={onClose}>
       <div className="sheet" onClick={(e) => e.stopPropagation()}>
         <div className="grip" />
         {title && <h3>{title}</h3>}
         {children}
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
 
@@ -93,6 +96,26 @@ export function Backdrop() {
 
 export function Logo({ height = 22 }: { height?: number }) {
   return <img src="/logo-light.svg" alt="NEX" style={{ height, display: 'block' }} />
+}
+
+/** Плавный счётчик чисел */
+export function CountUp({ value, format, ms = 900 }: { value: number; format: (v: number) => string; ms?: number }) {
+  const [v, setV] = useState(0)
+  useEffect(() => {
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return setV(value)
+    let raf = 0
+    const start = performance.now()
+    const from = 0
+    const tick = (t: number) => {
+      const k = Math.min(1, (t - start) / ms)
+      const e = 1 - Math.pow(1 - k, 3)
+      setV(from + (value - from) * e)
+      if (k < 1) raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [value, ms])
+  return <>{format(v)}</>
 }
 
 export function Spinner() {

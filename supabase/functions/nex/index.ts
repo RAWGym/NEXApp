@@ -1,6 +1,7 @@
 // NEX backend: API для мини-приложения + вебхук Telegram-бота + проверка уведомлений о курсе.
 // Секреты: BOT_TOKEN, ADMIN_IDS (через запятую), WEBAPP_URL, CRON_SECRET.
 import { createClient } from 'npm:@supabase/supabase-js@2.45.4'
+import { namesMatch, parseMrz } from './mrz.ts'
 
 const db = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!, { auth: { persistSession: false } })
 
@@ -9,6 +10,7 @@ let BOT_TOKEN = ''
 let ADMIN_IDS: number[] = []
 let WEBAPP_URL = ''
 let CRON_SECRET = ''
+let KYC_KEY = ''
 let configLoadedAt = 0
 async function loadConfig() {
   if (Date.now() - configLoadedAt < 60_000) return
@@ -18,15 +20,44 @@ async function loadConfig() {
   ADMIN_IDS = String(Deno.env.get('ADMIN_IDS') ?? c.ADMIN_IDS ?? '').split(',').map((s) => Number(s.trim())).filter(Boolean)
   WEBAPP_URL = Deno.env.get('WEBAPP_URL') ?? c.WEBAPP_URL ?? ''
   CRON_SECRET = Deno.env.get('CRON_SECRET') ?? c.CRON_SECRET ?? ''
+  KYC_KEY = Deno.env.get('KYC_KEY') ?? c.KYC_KEY ?? ''
   configLoadedAt = Date.now()
 }
 
 /* ---------------- настройки обмена ---------------- */
 const FEE_PCT = 3
-const MIN_KZT = 10_000
-const MAX_KZT = 1_000_000
+const MIN_KZT = 5_000
+/** До этой суммы достаточно ФИО, телефона и даты рождения; выше нужна проверка документов */
+const MAX_KZT = 300_000
 const MAX_KZT_VERIFIED = 5_000_000
+/* ---------------- программа лояльности ---------------- */
+const TIERS = [
+  { id: 'standard', name: 'Standard', min: 0, off: 0 },
+  { id: 'silver', name: 'Silver', min: 1_000_000, off: 0.25 },
+  { id: 'gold', name: 'Gold', min: 5_000_000, off: 0.5 },
+  { id: 'black', name: 'Black', min: 20_000_000, off: 0.75 },
+]
+const LARGE = [
+  { min: 3_000_000, off: 0.5 },
+  { min: 1_000_000, off: 0.25 },
+]
+const WELCOME_OFF = 1 // скидка приглашённому на первый обмен
+const MIN_FEE = 1.5
+const REF_SHARE = 0.2 // доля комиссии, которая начисляется пригласившему бонусами
+const BONUS_MAX_SHARE = 0.5 // бонусами можно оплатить не больше половины комиссии
+const tierOf = (vol: number) => [...TIERS].reverse().find((t) => vol >= t.min)!
+function pricing(volumeKzt: number, amountKzt: number, welcome: boolean) {
+  const tier = tierOf(volumeKzt)
+  const discounts: { id: string; label: string; off: number }[] = []
+  if (tier.off) discounts.push({ id: 'tier', label: `Уровень ${tier.name}`, off: tier.off })
+  const large = LARGE.find((l) => amountKzt >= l.min)
+  if (large) discounts.push({ id: 'large', label: 'Крупная сумма', off: large.off })
+  if (welcome) discounts.push({ id: 'welcome', label: 'Первый обмен по приглашению', off: WELCOME_OFF })
+  const fee = Math.max(MIN_FEE, FEE_PCT - discounts.reduce((s, d) => s + d.off, 0))
+  return { fee: round(fee, 2), discounts }
+}
 const MAX_ACTIVE_ORDERS = 3
+const ORDER_COOLDOWN_SEC = 300
 const CUR: Record<string, { type: 'fiat' | 'crypto'; dp: number; gecko?: string; sym: string }> = {
   KZT: { type: 'fiat', dp: 2, sym: '₸' },
   USD: { type: 'fiat', dp: 2, sym: '$' },
@@ -47,7 +78,7 @@ const CORS = {
 }
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', ...CORS } })
-const fail = (msg: string, status = 400) => json({ error: msg }, status)
+const fail = (msg: string, status = 400, extra: Record<string, unknown> = {}) => json({ error: msg, ...extra }, status)
 
 async function hmac(key: ArrayBuffer | Uint8Array | string, msg: string): Promise<Uint8Array> {
   const k = await crypto.subtle.importKey('raw', (typeof key === 'string' ? enc.encode(key) : key) as BufferSource, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
@@ -62,6 +93,32 @@ function safeEq(a: string, b: string) {
   for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i)
   return r === 0
 }
+/* ---------------- шифрование данных KYC (AES-256-GCM) ---------------- */
+async function aesKey() {
+  if (!KYC_KEY) throw new Error('KYC_KEY не задан')
+  const raw = Uint8Array.from(atob(KYC_KEY), (c) => c.charCodeAt(0))
+  return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt'])
+}
+async function encryptBytes(data: Uint8Array): Promise<Uint8Array> {
+  const iv = crypto.getRandomValues(new Uint8Array(12))
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await aesKey(), data as BufferSource))
+  const out = new Uint8Array(12 + ct.length)
+  out.set(iv)
+  out.set(ct, 12)
+  return out
+}
+async function decryptBytes(data: Uint8Array): Promise<Uint8Array> {
+  return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: data.slice(0, 12) }, await aesKey(), data.slice(12)))
+}
+const toB64 = (b: Uint8Array) => {
+  let s = ''
+  for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode(...b.subarray(i, i + 0x8000))
+  return btoa(s)
+}
+const fromB64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0))
+const encryptJson = async (o: unknown) => toB64(await encryptBytes(enc.encode(JSON.stringify(o))))
+const decryptJson = async (s: string) => JSON.parse(new TextDecoder().decode(await decryptBytes(fromB64(s))))
+
 const esc = (s: unknown) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 const nf = (n: number, dp = 2) => new Intl.NumberFormat('ru-RU', { maximumFractionDigits: dp }).format(n).replace(/[\u202f\u00a0]/g, ' ')
 const money = (n: number, c: string) => `${nf(n, CUR[c]?.type === 'fiat' ? 2 : CUR[c]?.dp ?? 2)} ${c}`
@@ -99,7 +156,9 @@ async function verifyInitData(initData: string) {
   if (!safeEq(hex(await hmac(secret, dcs)), hash)) return null
   if (Date.now() / 1000 - Number(params.get('auth_date')) > 86400) return null
   try {
-    return JSON.parse(params.get('user') || 'null')
+    const u = JSON.parse(params.get('user') || 'null')
+    if (u) u._start = params.get('start_param') ?? ''
+    return u
   } catch {
     return null
   }
@@ -119,23 +178,111 @@ async function upsertUser(u: any) {
   if (error) throw error
 }
 
-const USER_FIELDS = 'id, first_name, last_name, username, photo_url, phone, kyc_status, kyc_note, created_at, blocked'
+const USER_FIELDS =
+  'id, first_name, last_name, username, photo_url, phone, phone_verified, kyc_status, kyc_note, created_at, blocked, profile_enc, profile_done, ref_code, referred_by, bonus_kzt, volume_kzt, ref_earned_kzt'
 async function getUser(id: number) {
   const { data } = await db.from('users').select(USER_FIELDS).eq('id', id).maybeSingle()
+  if (data && !data.ref_code) {
+    // Реферальный код создаётся при первом обращении
+    for (let i = 0; i < 3 && !data.ref_code; i++) {
+      const code = refCode()
+      const { error } = await db.from('users').update({ ref_code: code }).eq('id', id).is('ref_code', null)
+      if (!error) data.ref_code = code
+    }
+  }
   return data
+}
+const REF_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+const refCode = () => [...crypto.getRandomValues(new Uint8Array(7))].map((b) => REF_ALPHABET[b % REF_ALPHABET.length]).join('')
+
+/** Нормализация телефона к виду +77011234567 */
+function normPhone(s: unknown): string | null {
+  let d = String(s ?? '').replace(/\D/g, '')
+  if (d.length === 11 && d.startsWith('8')) d = '7' + d.slice(1)
+  if (d.length === 10 && d.startsWith('7')) d = '7' + d
+  if (d.length < 10 || d.length > 15) return null
+  return '+' + d
+}
+const maskPhone = (p: string) => p.slice(0, 2) + ' *** *** ' + p.slice(-4, -2) + ' ' + p.slice(-2)
+
+// deno-lint-ignore no-explicit-any
+async function readProfile(u: any): Promise<{ full_name?: string; birth_date?: string }> {
+  if (!u?.profile_enc) return {}
+  try {
+    return await decryptJson(u.profile_enc)
+  } catch {
+    return {}
+  }
+}
+
+/** Привязка приглашения: только для новых клиентов без обменов и не самому себе */
+async function applyReferral(uid: number, code: string) {
+  if (!code) return false
+  const { data: ref } = await db.from('users').select('id').eq('ref_code', code.toUpperCase()).maybeSingle()
+  if (!ref || ref.id === uid) return false
+  const { count } = await db.from('orders').select('*', { count: 'exact', head: true }).eq('user_id', uid)
+  if (count) return false
+  const { data } = await db.from('users').update({ referred_by: ref.id }).eq('id', uid).is('referred_by', null).select('id').maybeSingle()
+  return !!data
+}
+
+// deno-lint-ignore no-explicit-any
+async function loyalty(u: any) {
+  const [{ count: completed }, { count: referrals }] = await Promise.all([
+    db.from('orders').select('*', { count: 'exact', head: true }).eq('user_id', u.id).eq('status', 'completed'),
+    db.from('users').select('*', { count: 'exact', head: true }).eq('referred_by', u.id),
+  ])
+  const vol = Number(u.volume_kzt ?? 0)
+  const tier = tierOf(vol)
+  const next = TIERS.find((t) => t.min > vol) ?? null
+  const { data: me } = await db.from('kv').select('value').eq('key', 'bot').maybeSingle()
+  const bot = (me?.value as { username?: string } | null)?.username ?? 'noirexcbot'
+  return {
+    tier: tier.id,
+    tier_name: tier.name,
+    tier_off: tier.off,
+    next_tier: next ? { id: next.id, name: next.name, min: next.min, off: next.off } : null,
+    volume_kzt: vol,
+    bonus_kzt: Number(u.bonus_kzt ?? 0),
+    ref_code: u.ref_code,
+    ref_link: `https://t.me/${bot}?start=ref_${u.ref_code}`,
+    referrals: referrals ?? 0,
+    ref_earned_kzt: Number(u.ref_earned_kzt ?? 0),
+    welcome: !!u.referred_by && !completed,
+    completed: completed ?? 0,
+  }
+}
+// deno-lint-ignore no-explicit-any
+async function publicUser(u: any) {
+  const { profile_enc: _p, blocked: _b, ...rest } = u
+  const prof = await readProfile(u)
+  return { ...rest, full_name: prof.full_name ?? null, birth_date: prof.birth_date ?? null, loyalty: await loyalty(u) }
 }
 
 /* ---------------- Telegram ---------------- */
 // deno-lint-ignore no-explicit-any
 async function tg(method: string, body: Record<string, unknown> | FormData): Promise<any> {
   const isForm = body instanceof FormData
-  const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
-    method: 'POST',
-    headers: isForm ? undefined : { 'Content-Type': 'application/json' },
-    body: isForm ? body : JSON.stringify(body),
-  })
-  const j = await r.json().catch(() => ({}))
-  if (!j.ok) console.error('tg', method, JSON.stringify(j))
+  // deno-lint-ignore no-explicit-any
+  let j: any = {}
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
+        method: 'POST',
+        headers: isForm ? undefined : { 'Content-Type': 'application/json' },
+        body: isForm ? body : JSON.stringify(body),
+      })
+      j = await r.json().catch(() => ({}))
+    } catch (e) {
+      j = { ok: false, description: String(e) }
+    }
+    if (j.ok) return j
+    // лимит Telegram: ждём сколько попросили; сетевой сбой: короткая пауза
+    const wait = j.parameters?.retry_after ? Math.min(j.parameters.retry_after, 5) * 1000 : j.error_code ? 0 : 700
+    if (!wait) break
+    await new Promise((r) => setTimeout(r, wait))
+  }
+  console.error('tg', method, JSON.stringify(j))
   return j
 }
 const send = (chat_id: number, text: string, extra: Record<string, unknown> = {}) =>
@@ -151,6 +298,22 @@ async function notifyAdmins(text: string, extra: Record<string, unknown> = {}) {
     if (r.ok) ids.push(r.result.message_id)
   }
   return ids
+}
+
+/** Имя бота (кэшируется в kv, чтобы не спрашивать Telegram на каждый вход) */
+async function botInfo(): Promise<string> {
+  const { data } = await db.from('kv').select('value').eq('key', 'bot').maybeSingle()
+  const u = (data?.value as { username?: string } | null)?.username
+  if (u) return u
+  const me = await tg('getMe', {})
+  const name = me.result?.username ?? 'noirexcbot'
+  if (me.ok) await db.from('kv').upsert({ key: 'bot', value: { username: name } })
+  return name
+}
+// deno-lint-ignore no-explicit-any
+async function withProfile(u: any) {
+  if (u && !u._prof) u._prof = await readProfile(u)
+  return u
 }
 
 /* ---------------- курсы ---------------- */
@@ -195,13 +358,16 @@ function orderText(o: any, u: any, head: string) {
     `<b>${head}</b>`,
     '',
     `👤 ${clientLine(u)}`,
-    `ID: <code>${u.id}</code>${u.phone ? ` · 📞 ${esc(u.phone)}` : ''}`,
+    `ID: <code>${u.id}</code>${u.phone ? ` · 📞 ${esc(u.phone)}${u.phone_verified ? ' ✓' : ''}` : ''}`,
+    u._prof?.full_name ? `ФИО: ${esc(u._prof.full_name)}, д.р. ${esc(u._prof.birth_date)}` : '',
     `Верификация: ${{ none: 'не пройдена', pending: 'на проверке', verified: 'пройдена', rejected: 'отклонена' }[u.kyc_status as string]}`,
     '',
     `↗️ Отдаёт: <b>${money(+o.amount_from, o.from_cur)}</b>`,
     `↘️ Получает: <b>${money(+o.amount_to, o.to_cur)}</b>`,
     `Курс: ${rateText(o.from_cur, o.to_cur, +o.rate)}`,
     `Комиссия ${o.fee_pct}%: ${money(+o.fee_amount, o.to_cur)}`,
+    Array.isArray(o.discounts) && o.discounts.length ? `Скидки: ${o.discounts.map((d: { label: string; off: number }) => `${esc(d.label)} −${d.off}%`).join(', ')}` : '',
+    +o.bonus_used > 0 ? `Оплачено бонусами: ${money(+o.bonus_used, o.to_cur)}` : '',
     `Способ: ${esc(o.method)}`,
     o.details ? `Детали: ${esc(o.details)}` : '',
     o.note ? `Комментарий: ${esc(o.note)}` : '',
@@ -226,6 +392,27 @@ const STATUS_HEAD: Record<string, string> = {
   cancelled: '↩️ Отменена клиентом: заявка №',
 }
 
+/* ---------------- вход по номеру: одноразовый код в Telegram ---------------- */
+const OTP_TTL = 5 * 60_000
+const otpHash = async (sid: string, code: string) => hex(await hmac(await sessionKey(), `otp:${sid}:${code}`))
+async function sendOtp(sid: string, tgId: number) {
+  const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 900000 + 100000)
+  const { data } = await db
+    .from('phone_logins')
+    .update({ otp_hash: await otpHash(sid, code), otp_sent_at: new Date().toISOString(), user_id: tgId, attempts: 0 })
+    .eq('sid', sid)
+    .select('sends')
+    .maybeSingle()
+  if (!data) return false
+  await db.from('phone_logins').update({ sends: (data.sends ?? 0) + 1 }).eq('sid', sid)
+  const r = await send(
+    tgId,
+    `🔐 Код для входа в NEX: <code>${code}</code>\n\nДействует 5 минут. Никому не сообщайте код, даже сотрудникам NEX.`,
+    { protect_content: true, reply_markup: { inline_keyboard: [[{ text: '✖️ Это не я', callback_data: `otpno:${sid}` }]] } },
+  )
+  return !!r.ok
+}
+
 /* ---------------- обработчики бота ---------------- */
 // deno-lint-ignore no-explicit-any
 async function onUpdate(up: any) {
@@ -240,11 +427,29 @@ async function onMessage(m: any) {
   await upsertUser(from)
 
   if (m.contact) {
-    if (m.contact.user_id === from.id) {
-      await db.from('users').update({ phone: m.contact.phone_number }).eq('id', from.id)
-      await send(from.id, 'Спасибо! Номер сохранён, оператор сможет с вами связаться.')
+    if (m.contact.user_id !== from.id) return send(from.id, 'Отправьте, пожалуйста, свой номер кнопкой «📱 Поделиться номером».')
+    const phone = normPhone(m.contact.phone_number)
+    if (!phone) return
+    // Номер подтверждён Telegram: он принадлежит этому аккаунту
+    await db.from('users').update({ phone_verified: false }).eq('phone', phone).neq('id', from.id)
+    await db.from('users').update({ phone, phone_verified: true }).eq('id', from.id)
+    const { data: login } = await db
+      .from('phone_logins')
+      .select('sid, phone')
+      .eq('tg_user_id', from.id)
+      .is('otp_hash', null)
+      .gte('created_at', new Date(Date.now() - 15 * 60_000).toISOString())
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    if (login) {
+      if (login.phone !== phone)
+        return send(from.id, `Номер вашего Telegram (${esc(maskPhone(phone))}) не совпадает с введённым в приложении (${esc(maskPhone(login.phone))}). Введите в приложении номер, к которому привязан этот Telegram.`, { reply_markup: { remove_keyboard: true } })
+      await send(from.id, '✅ Номер подтверждён.', { reply_markup: { remove_keyboard: true } })
+      await sendOtp(login.sid, from.id)
+      return
     }
-    return
+    return send(from.id, '✅ Номер сохранён и подтверждён. Теперь вы можете входить в NEX по номеру телефона.', { reply_markup: { remove_keyboard: true } })
   }
 
   const text: string = m.text ?? ''
@@ -252,11 +457,35 @@ async function onMessage(m: any) {
 
   if (cmd === '/start' && arg?.startsWith('login_')) {
     const code = arg.slice(6)
-    const { data } = await db.from('login_codes').select('code, created_at, user_id').eq('code', code).maybeSingle()
-    if (!data || Date.now() - new Date(data.created_at).getTime() > 10 * 60_000)
+    const { data } = await db.from('login_codes').select('code, created_at, user_id, pin').eq('code', code).maybeSingle()
+    if (!data || data.user_id || Date.now() - new Date(data.created_at).getTime() > 10 * 60_000)
       return send(from.id, 'Ссылка для входа устарела. Нажмите «Войти через Telegram» в приложении ещё раз.')
-    await db.from('login_codes').update({ user_id: from.id }).eq('code', code)
-    return send(from.id, '✅ Вход подтверждён. Вернитесь в приложение NEX, оно откроется автоматически.')
+    // Вход подтверждается кнопкой, чтобы чужая ссылка не могла открыть доступ к аккаунту
+    return send(
+      from.id,
+      `🔐 <b>Вход в NEX</b>\n\nКод на экране приложения: <b>${data.pin}</b>\n\nПодтверждайте, только если вы сами нажали «Войти» и код совпадает. Сотрудники NEX никогда не просят переслать эту ссылку.`,
+      { reply_markup: { inline_keyboard: [[{ text: '✅ Подтвердить вход', callback_data: `login:${code}` }], [{ text: '✖️ Это не я', callback_data: `nologin:${code}` }]] } },
+    )
+  }
+
+  if (cmd === '/start' && arg?.startsWith('ph_')) {
+    const sid = arg.slice(3)
+    const { data } = await db.from('phone_logins').select('sid, phone, tg_user_id, created_at, otp_hash').eq('sid', sid).maybeSingle()
+    if (!data || data.otp_hash || Date.now() - new Date(data.created_at).getTime() > 15 * 60_000 || (data.tg_user_id && data.tg_user_id !== from.id))
+      return send(from.id, 'Ссылка для входа устарела. Введите номер в приложении ещё раз.')
+    await db.from('phone_logins').update({ tg_user_id: from.id }).eq('sid', sid)
+    const { data: me } = await db.from('users').select('phone, phone_verified').eq('id', from.id).maybeSingle()
+    if (me?.phone_verified && me.phone === data.phone) return sendOtp(sid, from.id)
+    return send(
+      from.id,
+      `🔐 <b>Вход в NEX по номеру</b>\n\nВ приложении введён номер ${esc(maskPhone(data.phone))}. Нажмите кнопку ниже, чтобы подтвердить, что это ваш номер. Это нужно сделать один раз, дальше код будет приходить сразу.`,
+      { reply_markup: { keyboard: [[{ text: '📱 Поделиться номером', request_contact: true }]], resize_keyboard: true, one_time_keyboard: true } },
+    )
+  }
+
+  if (cmd === '/start' && arg?.startsWith('ref_')) {
+    const ok = await applyReferral(from.id, arg.slice(4))
+    if (ok) await send(from.id, `🎁 Вы пришли по приглашению. На первый обмен комиссия ниже на ${WELCOME_OFF}%.`)
   }
 
   if (cmd === '/start' || cmd === '/app') {
@@ -265,7 +494,10 @@ async function onMessage(m: any) {
       `Добро пожаловать в <b>NEX</b>, ${esc(from.first_name)}!\n\nОбмен валют и цифровых активов: актуальные курсы, комиссия ${FEE_PCT}% и живой оператор в Telegram.\n\nНажмите кнопку ниже, чтобы открыть приложение.`,
       { reply_markup: appButton('Открыть NEX') },
     )
-    if (isAdmin(from.id)) await send(from.id, ADMIN_HELP)
+    if (isAdmin(from.id)) {
+      await tg('setMyCommands', { scope: { type: 'chat', chat_id: from.id }, commands: ADMIN_COMMANDS })
+      await send(from.id, ADMIN_HELP)
+    }
     return
   }
 
@@ -278,6 +510,7 @@ async function onMessage(m: any) {
     const { data } = await db.from('orders').select('*, users(*)').in('status', ['new', 'accepted']).order('created_at').limit(20)
     if (!data?.length) return send(from.id, 'Активных заявок нет.')
     for (const o of data) {
+      await withProfile(o.users)
       const r = await send(from.id, orderText(o, o.users, STATUS_HEAD[o.status] + o.id), { reply_markup: orderKeyboard(o, o.users) })
       if (r.ok) await db.from('orders').update({ admin_msg_id: r.result.message_id }).eq('id', o.id)
     }
@@ -312,6 +545,13 @@ async function onMessage(m: any) {
   return send(from.id, ADMIN_HELP)
 }
 
+const ADMIN_COMMANDS = [
+  { command: 'orders', description: 'Активные заявки' },
+  { command: 'kyc', description: 'Анкеты на проверке' },
+  { command: 'stats', description: 'Статистика' },
+  { command: 'start', description: 'Открыть NEX' },
+]
+
 const ADMIN_HELP = [
   '🛠 <b>Панель оператора</b>',
   '',
@@ -326,8 +566,38 @@ const ADMIN_HELP = [
 // deno-lint-ignore no-explicit-any
 async function onCallback(q: any) {
   const answer = (text = '', alert = false) => tg('answerCallbackQuery', { callback_query_id: q.id, text, show_alert: alert })
-  if (!isAdmin(q.from.id)) return answer('Недостаточно прав', true)
   const [action, idStr] = String(q.data).split(':')
+
+  if (action === 'otpno') {
+    await db.from('phone_logins').delete().eq('sid', idStr)
+    await tg('editMessageText', { chat_id: q.message.chat.id, message_id: q.message.message_id, text: 'Код отменён. Никто не сможет им воспользоваться. Если вы не входили, просто проигнорируйте это сообщение.' })
+    return answer('Код отменён')
+  }
+
+  if (action === 'login' || action === 'nologin') {
+    const clear = () => tg('editMessageReplyMarkup', { chat_id: q.message.chat.id, message_id: q.message.message_id, reply_markup: { inline_keyboard: [] } })
+    if (action === 'nologin') {
+      await db.from('login_codes').delete().eq('code', idStr).is('user_id', null)
+      await clear()
+      await send(q.from.id, 'Вход отменён. Если вы не пытались войти, просто проигнорируйте это сообщение: доступ к аккаунту никто не получил.')
+      return answer('Отменено')
+    }
+    await upsertUser(q.from)
+    const { data } = await db
+      .from('login_codes')
+      .update({ user_id: q.from.id })
+      .eq('code', idStr)
+      .is('user_id', null)
+      .gte('created_at', new Date(Date.now() - 10 * 60_000).toISOString())
+      .select('code')
+      .maybeSingle()
+    await clear()
+    if (!data) return answer('Ссылка устарела, начните вход заново', true)
+    await send(q.from.id, '✅ Вход подтверждён. Вернитесь в приложение NEX.')
+    return answer('Готово')
+  }
+
+  if (!isAdmin(q.from.id)) return answer('Недостаточно прав', true)
   const id = Number(idStr)
 
   if (action === 'kyc_ok' || action === 'kyc_no') {
@@ -352,6 +622,7 @@ async function onCallback(q: any) {
 
   const { data: o } = await db.from('orders').select('*, users(*)').eq('id', id).maybeSingle()
   if (!o) return answer('Заявка не найдена', true)
+  await withProfile(o.users)
   const now = new Date().toISOString()
   let patch: Record<string, unknown> | null = null
   let userMsg = ''
@@ -369,6 +640,8 @@ async function onCallback(q: any) {
 
   const { data: upd } = await db.from('orders').update(patch).eq('id', o.id).eq('status', o.status).select().maybeSingle()
   if (!upd) return answer('Статус заявки уже изменён', true)
+  if (upd.status === 'rejected' && +upd.bonus_used_kzt > 0) await db.rpc('user_credit', { uid: o.user_id, bonus: +upd.bonus_used_kzt, volume: 0 })
+  if (upd.status === 'completed') await onCompleted(upd, o.users)
   await tg('editMessageText', {
     chat_id: q.message.chat.id,
     message_id: q.message.message_id,
@@ -389,37 +662,84 @@ async function onCallback(q: any) {
   return answer('Готово')
 }
 
+/** Обмен завершён: оборот для уровня лояльности и бонус пригласившему */
+// deno-lint-ignore no-explicit-any
+async function onCompleted(o: any, u: any) {
+  const m = await getMarket()
+  const kzt = o.amount_kzt != null ? +o.amount_kzt : +o.amount_from * cross(m, o.from_cur, 'KZT')
+  const before = tierOf(Number(u.volume_kzt ?? 0))
+  await db.rpc('user_credit', { uid: o.user_id, bonus: 0, volume: kzt })
+  const after = tierOf(Number(u.volume_kzt ?? 0) + kzt)
+  if (after.id !== before.id)
+    await send(o.user_id, `🏆 Новый уровень: <b>${after.name}</b>! Теперь комиссия на ${after.off}% ниже на все обмены.`, { reply_markup: appButton('Открыть NEX') })
+  if (u.referred_by) {
+    const netFeeKzt = (+o.fee_amount - +(o.bonus_used ?? 0)) * cross(m, o.to_cur, 'KZT')
+    const reward = Math.floor(Math.max(0, netFeeKzt) * REF_SHARE)
+    if (reward > 0) {
+      await db.rpc('user_credit', { uid: u.referred_by, bonus: reward, volume: 0, ref_earned: reward })
+      await send(u.referred_by, `🎁 Ваш друг совершил обмен. Вам начислено ${nf(reward, 0)} ₸ бонусов: ими можно оплатить комиссию следующего обмена.`, { reply_markup: appButton('Открыть NEX') })
+    }
+  }
+}
+
+const DOC_NAME: Record<string, string> = { id_card: 'Удостоверение личности', passport: 'Паспорт', residence: 'Вид на жительство' }
+const FILE_NAME: Record<string, string> = { doc_front: 'Документ, лицевая сторона', doc_back: 'Документ, оборотная сторона', face: 'Сканирование лица', doc_face: 'Фото из документа' }
+
 // deno-lint-ignore no-explicit-any
 async function sendKycToAdmin(chat: number, u: any, withPhotos = true) {
-  const k = u.kyc ?? {}
-  if (withPhotos && k.files?.length) {
+  // deno-lint-ignore no-explicit-any
+  let k: any = u.kyc ?? {}
+  if (u.kyc_enc) {
+    try {
+      k = await decryptJson(u.kyc_enc)
+    } catch (e) {
+      console.error('kyc decrypt', e)
+    }
+  }
+  const files: Record<string, string> = Array.isArray(k.files) ? Object.fromEntries(k.files.map((p: string, i: number) => [i ? 'face' : 'doc_front', p])) : k.files ?? {}
+  if (withPhotos && Object.keys(files).length) {
     const fd = new FormData()
     fd.append('chat_id', String(chat))
     const media = []
-    for (const [i, path] of (k.files as string[]).entries()) {
+    for (const [key, path] of Object.entries(files)) {
       const { data } = await db.storage.from('kyc').download(path)
       if (!data) continue
-      fd.append(`f${i}`, data, `f${i}.jpg`)
-      media.push({ type: 'photo', media: `attach://f${i}`, caption: i === 0 ? 'Документ' : 'Селфи с документом' })
+      let bytes: Uint8Array = new Uint8Array(await data.arrayBuffer())
+      if (path.endsWith('.bin')) bytes = await decryptBytes(bytes)
+      fd.append(key, new Blob([bytes as BlobPart], { type: 'image/jpeg' }), `${key}.jpg`)
+      media.push({ type: 'photo', media: `attach://${key}`, caption: FILE_NAME[key] ?? key })
     }
     if (media.length) {
       fd.append('media', JSON.stringify(media))
       await tg('sendMediaGroup', fd)
     }
   }
+  const checks: { label: string; ok: boolean | null; note?: string }[] = Array.isArray(k.checks) ? k.checks : []
+  const mark = (ok: boolean | null) => (ok === true ? '✅' : ok === false ? '❌' : '➖')
+  const failed = checks.filter((c) => c.ok !== true).length
   return send(
     chat,
     [
       '🪪 <b>Анкета на верификацию</b>',
       '',
       `👤 ${clientLine(u)}  ID: <code>${u.id}</code>`,
+      checks.length ? (k.auto_passed ? '🟢 <b>Сверка пройдена</b>' : `🟠 <b>Сверка не пройдена</b> (${failed} из ${checks.length})`) : '',
+      '',
       `ФИО: ${esc(k.full_name)}`,
+      k.latin_name ? `Латиницей: ${esc(k.latin_name)}` : '',
       `Дата рождения: ${esc(k.birth_date)}`,
       `Гражданство: ${esc(k.citizenship)}`,
-      `Документ: ${esc(k.doc_type)}, № ${esc(k.doc_number)}`,
+      `Документ: ${esc(DOC_NAME[k.doc_type] ?? k.doc_type)}, № ${esc(k.doc_number)}`,
+      k.expiry_date ? `Действителен до: ${esc(k.expiry_date)}` : '',
+      k.personal_number ? `ИИН / личный номер: ${esc(k.personal_number)}` : '',
       `Телефон: ${esc(k.phone)}`,
-      `Адрес: ${esc(k.address)}`,
-    ].join('\n'),
+      k.address ? `Адрес: ${esc(k.address)}` : '',
+      ...(checks.length ? ['', '<b>Автоматическая сверка</b>', ...checks.map((c) => `${mark(c.ok)} ${esc(c.label)}${c.note ? ` (${esc(c.note)})` : ''}`)] : []),
+      '',
+      'Сверьте сканы выше с данными и нажмите кнопку.',
+    ]
+      .filter((l, i, a) => l !== '' || a[i - 1] !== '')
+      .join('\n'),
     { reply_markup: { inline_keyboard: [[{ text: '✅ Одобрить', callback_data: `kyc_ok:${u.id}` }, { text: '✖️ Отклонить', callback_data: `kyc_no:${u.id}` }]] } },
   )
 }
@@ -435,13 +755,23 @@ async function api(req: Request, path: string): Promise<Response> {
     const u = await verifyInitData(String(initData ?? ''))
     if (!u) return fail('Не удалось подтвердить вход через Telegram', 401)
     await upsertUser(u)
+    if (String(u._start).startsWith('ref_')) await applyReferral(u.id, String(u._start).slice(4))
     return json({ token: await makeToken(u.id) })
   }
   if (path === '/auth/link/start' && method === 'POST') {
-    const code = hex(crypto.getRandomValues(new Uint8Array(12)))
-    await db.from('login_codes').insert({ code })
-    const me = await tg('getMe', {})
-    return json({ code, url: `https://t.me/${me.result?.username}?start=login_${code}` })
+    // Ограничение частоты: не больше 5 попыток входа в минуту с одного адреса
+    const ip = req.headers.get('x-forwarded-for')?.split(',')[0].trim() ?? ''
+    const ipHash = hex(await hmac('nex-ip', ip)).slice(0, 32)
+    const { count } = await db
+      .from('login_codes')
+      .select('*', { count: 'exact', head: true })
+      .eq('ip_hash', ipHash)
+      .gte('created_at', new Date(Date.now() - 60_000).toISOString())
+    if ((count ?? 0) >= 5) return fail('Слишком много попыток. Подождите минуту.', 429)
+    const code = hex(crypto.getRandomValues(new Uint8Array(16)))
+    const pin = String(crypto.getRandomValues(new Uint32Array(1))[0] % 9000 + 1000)
+    await db.from('login_codes').insert({ code, pin, ip_hash: ipHash })
+    return json({ code, pin, url: `https://t.me/${await botInfo()}?start=login_${code}` })
   }
   if (path === '/auth/link/poll' && method === 'GET') {
     const code = new URL(req.url).searchParams.get('code') ?? ''
@@ -452,6 +782,65 @@ async function api(req: Request, path: string): Promise<Response> {
     return json({ token: await makeToken(data.user_id) })
   }
 
+  if (path === '/auth/phone/start' && method === 'POST') {
+    const b = await req.json().catch(() => ({}))
+    const phone = normPhone(b.phone)
+    if (!phone) return fail('Введите номер телефона полностью')
+    const ip = req.headers.get('x-forwarded-for')?.split(',')[0].trim() ?? ''
+    const ipHash = hex(await hmac('nex-ip', ip)).slice(0, 32)
+    const since = new Date(Date.now() - 10 * 60_000).toISOString()
+    const [{ count: byIp }, { count: byPhone }] = await Promise.all([
+      db.from('phone_logins').select('*', { count: 'exact', head: true }).eq('ip_hash', ipHash).gte('created_at', since),
+      db.from('phone_logins').select('*', { count: 'exact', head: true }).eq('phone', phone).gte('created_at', since),
+    ])
+    if ((byIp ?? 0) >= 8 || (byPhone ?? 0) >= 4) return fail('Слишком много попыток. Попробуйте через 10 минут.', 429)
+    const sid = hex(crypto.getRandomValues(new Uint8Array(16)))
+    await db.from('phone_logins').insert({ sid, phone, ip_hash: ipHash })
+    const { data: owner } = await db.from('users').select('id, blocked').eq('phone', phone).eq('phone_verified', true).maybeSingle()
+    if (owner && !owner.blocked) {
+      await db.from('phone_logins').update({ tg_user_id: owner.id }).eq('sid', sid)
+      if (await sendOtp(sid, owner.id)) return json({ sid, sent: true })
+    }
+    // Номер ещё не привязан: один раз подтверждаем его в боте
+    const me = await botInfo()
+    return json({ sid, sent: false, url: `https://t.me/${me}?start=ph_${sid}` })
+  }
+  if (path === '/auth/phone/status' && method === 'GET') {
+    const sid = new URL(req.url).searchParams.get('sid') ?? ''
+    const { data } = await db.from('phone_logins').select('otp_sent_at, created_at').eq('sid', sid).maybeSingle()
+    if (!data || Date.now() - new Date(data.created_at).getTime() > 15 * 60_000) return fail('Время входа истекло, начните заново', 410)
+    return json({ sent: !!data.otp_sent_at })
+  }
+  if (path === '/auth/phone/resend' && method === 'POST') {
+    const b = await req.json().catch(() => ({}))
+    const { data } = await db.from('phone_logins').select('sid, tg_user_id, otp_sent_at, sends, created_at').eq('sid', String(b.sid ?? '')).maybeSingle()
+    if (!data || !data.tg_user_id || Date.now() - new Date(data.created_at).getTime() > 15 * 60_000) return fail('Время входа истекло, начните заново', 410)
+    if (data.otp_sent_at && Date.now() - new Date(data.otp_sent_at).getTime() < 60_000) return fail('Отправить код повторно можно через минуту', 429)
+    if ((data.sends ?? 0) >= 3) return fail('Код уже отправлялся 3 раза. Начните вход заново.', 429)
+    await sendOtp(data.sid, data.tg_user_id)
+    return json({ sent: true })
+  }
+  if (path === '/auth/phone/verify' && method === 'POST') {
+    const b = await req.json().catch(() => ({}))
+    const sid = String(b.sid ?? '')
+    const code = String(b.code ?? '').replace(/\D/g, '')
+    const { data } = await db.from('phone_logins').select('*').eq('sid', sid).maybeSingle()
+    if (!data || !data.otp_hash || Date.now() - new Date(data.otp_sent_at).getTime() > OTP_TTL) return fail('Код устарел. Запросите новый.', 410)
+    if (data.attempts >= 5) {
+      await db.from('phone_logins').delete().eq('sid', sid)
+      return fail('Слишком много неверных попыток. Начните вход заново.', 429)
+    }
+    // Сначала засчитываем попытку, потом сверяем: перебор невозможен даже параллельными запросами
+    const { data: upd } = await db.from('phone_logins').update({ attempts: data.attempts + 1 }).eq('sid', sid).eq('attempts', data.attempts).select('sid').maybeSingle()
+    if (!upd) return fail('Попробуйте ещё раз', 409)
+    if (!safeEq(await otpHash(sid, code), data.otp_hash)) return fail(`Неверный код. Осталось попыток: ${4 - data.attempts}`, 400, { code: 'bad_otp' })
+    await db.from('phone_logins').delete().eq('sid', sid)
+    const u = await getUser(data.user_id)
+    if (!u || u.blocked) return fail('Доступ ограничен. Обратитесь в поддержку.', 403)
+    await send(data.user_id, '✅ Выполнен вход в NEX по номеру телефона. Если это были не вы, напишите в поддержку.')
+    return json({ token: await makeToken(data.user_id) })
+  }
+
   // ниже нужна авторизация
   const uid = await readToken(req.headers.get('x-nex-token'))
   if (!uid) return fail('Сессия истекла, войдите снова', 401)
@@ -459,12 +848,31 @@ async function api(req: Request, path: string): Promise<Response> {
   if (!user) return fail('Пользователь не найден', 401)
   if (user.blocked) return fail('Доступ ограничен. Обратитесь в поддержку.', 403)
 
-  if (path === '/me' && method === 'GET') return json(user)
+  if (path === '/me' && method === 'GET') return json(await publicUser(user))
+
+  if (path === '/profile' && method === 'POST') {
+    const b = await req.json()
+    const full_name = String(b.full_name ?? '').replace(/\s+/g, ' ').trim().slice(0, 120)
+    const birth_date = String(b.birth_date ?? '').trim()
+    if (full_name.split(' ').length < 2 || !/^[\p{L}\s'.-]+$/u.test(full_name)) return fail('Укажите фамилию и имя полностью')
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(birth_date)) return fail('Укажите дату рождения')
+    const age = (Date.now() - new Date(birth_date).getTime()) / (365.25 * 86400_000)
+    if (!(age >= 18 && age < 110)) return fail('Сервис доступен с 18 лет')
+    const patch: Record<string, unknown> = { profile_enc: await encryptJson({ full_name, birth_date }) }
+    if (!user.phone_verified) {
+      const phone = normPhone(b.phone)
+      if (!phone) return fail('Укажите номер телефона')
+      patch.phone = phone
+    }
+    patch.profile_done = true
+    await db.from('users').update(patch).eq('id', uid)
+    return json(await publicUser(await getUser(uid)))
+  }
 
   if (path === '/orders' && method === 'GET') {
     const { data } = await db
       .from('orders')
-      .select('id, from_cur, to_cur, amount_from, amount_to, rate, fee_pct, fee_amount, method, details, note, status, admin_note, created_at, accepted_at, completed_at')
+      .select('id, from_cur, to_cur, amount_from, amount_to, rate, fee_pct, fee_base_pct, discounts, fee_amount, bonus_used, bonus_used_kzt, method, details, note, status, admin_note, created_at, accepted_at, completed_at')
       .eq('user_id', uid)
       .order('created_at', { ascending: false })
       .limit(200)
@@ -477,31 +885,57 @@ async function api(req: Request, path: string): Promise<Response> {
     const amount = Number(b.amount)
     if (!CUR[from] || !CUR[to] || from === to) return fail('Выберите разные валюты')
     if (!(amount > 0) || !isFinite(amount)) return fail('Введите сумму')
+    if (!user.profile_done || !user.phone) return fail('Заполните ФИО, телефон и дату рождения', 400, { code: 'profile' })
     const { count } = await db.from('orders').select('*', { count: 'exact', head: true }).eq('user_id', uid).in('status', ['new', 'accepted'])
     if ((count ?? 0) >= MAX_ACTIVE_ORDERS) return fail(`Не больше ${MAX_ACTIVE_ORDERS} активных заявок одновременно. Дождитесь завершения текущих.`)
     const m = await getMarket()
     const kzt = amount * cross(m, from, 'KZT')
     const max = user.kyc_status === 'verified' ? MAX_KZT_VERIFIED : MAX_KZT
     if (kzt < MIN_KZT) return fail(`Минимальная сумма заявки ${nf(MIN_KZT, 0)} ₸ в эквиваленте`)
-    if (kzt > max) return fail(`Максимальная сумма заявки ${nf(max, 0)} ₸ в эквиваленте${user.kyc_status === 'verified' ? '' : '. Пройдите верификацию, чтобы увеличить лимит.'}`)
+    if (kzt > max)
+      return fail(
+        user.kyc_status === 'verified' ? `Максимальная сумма заявки ${nf(max, 0)} ₸ в эквиваленте` : `Для суммы больше ${nf(max, 0)} ₸ нужно подтвердить документы`,
+        400,
+        user.kyc_status === 'verified' ? {} : { code: 'kyc' },
+      )
+    const loy = await loyalty(user)
+    const price = pricing(loy.volume_kzt, kzt, loy.welcome)
     const rate = cross(m, from, to)
     const gross = amount * rate
-    const fee = (gross * FEE_PCT) / 100
+    const fee = (gross * price.fee) / 100
+    // Бонусы списываются в счёт комиссии, не больше половины
+    const feeKzt = fee * cross(m, to, 'KZT')
+    const bonusKzt = b.use_bonus ? Math.floor(Math.min(loy.bonus_kzt, feeKzt * BONUS_MAX_SHARE)) : 0
+    const bonusTo = bonusKzt * cross(m, 'KZT', to)
     const row = {
       user_id: uid,
       from_cur: from,
       to_cur: to,
       amount_from: round(amount, CUR[from].dp),
-      amount_to: round(gross - fee, CUR[to].dp),
+      amount_to: round(gross - fee + bonusTo, CUR[to].dp),
       rate,
-      fee_pct: FEE_PCT,
+      fee_pct: price.fee,
+      fee_base_pct: FEE_PCT,
+      discounts: price.discounts,
       fee_amount: round(fee, CUR[to].dp),
+      amount_kzt: round(kzt, 2),
+      bonus_used_kzt: bonusKzt,
+      bonus_used: round(bonusTo, CUR[to].dp),
       method: String(b.method ?? 'Наличные').slice(0, 40),
       details: b.details ? String(b.details).slice(0, 200) : null,
       note: b.note ? String(b.note).slice(0, 500) : null,
     }
-    const { data: o, error } = await db.from('orders').insert(row).select().single()
-    if (error) return fail('Не удалось создать заявку', 500)
+    // Атомарно в базе: защита от дублей и не чаще одной заявки в 5 минут
+    const { data: r, error } = await db.rpc('create_order_guarded', { p: row, cooldown_sec: ORDER_COOLDOWN_SEC })
+    if (error || !r) return fail('Не удалось создать заявку', 500)
+    if (r.error === 'bonus') return fail('Бонусный баланс изменился. Обновите страницу и попробуйте снова.', 409)
+    if (r.error === 'duplicate') return fail(`Такая заявка №${r.order_id} уже на рассмотрении. Дождитесь ответа оператора.`, 409, { code: 'duplicate', order_id: r.order_id })
+    if (r.error === 'cooldown') {
+      const sec = Number(r.retry_after)
+      return fail(`Новую заявку можно создать через ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`, 429, { code: 'cooldown', retry_after: sec })
+    }
+    const o = r.order
+    await withProfile(user)
     const ids = await notifyAdmins(orderText(o, user, STATUS_HEAD.new + o.id), { reply_markup: orderKeyboard(o, user) })
     if (ids[0]) await db.from('orders').update({ admin_msg_id: ids[0] }).eq('id', o.id)
     await send(uid, `📨 Заявка №${o.id} отправлена.\n\nОтдаёте: ${money(+o.amount_from, from)}\nПолучите: ${money(+o.amount_to, to)}\n\nМы сообщим, как только оператор её примет.`)
@@ -512,6 +946,8 @@ async function api(req: Request, path: string): Promise<Response> {
   if (cancel && method === 'POST') {
     const { data: o } = await db.from('orders').update({ status: 'cancelled' }).eq('id', Number(cancel[1])).eq('user_id', uid).eq('status', 'new').select().maybeSingle()
     if (!o) return fail('Заявку уже нельзя отменить')
+    if (+o.bonus_used_kzt > 0) await db.rpc('user_credit', { uid, bonus: +o.bonus_used_kzt, volume: 0 })
+    await withProfile(user)
     if (o.admin_msg_id)
       for (const a of ADMIN_IDS)
         await tg('editMessageText', { chat_id: a, message_id: o.admin_msg_id, text: orderText(o, user, STATUS_HEAD.cancelled + o.id), parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } })
@@ -520,30 +956,79 @@ async function api(req: Request, path: string): Promise<Response> {
 
   if (path === '/kyc' && method === 'POST') {
     if (user.kyc_status === 'verified') return fail('Аккаунт уже подтверждён')
+    if (user.kyc_status === 'pending') return fail('Анкета уже на проверке')
     const b = await req.json()
-    const need = ['full_name', 'birth_date', 'citizenship', 'doc_type', 'doc_number', 'phone']
-    for (const k of need) if (!String(b[k] ?? '').trim()) return fail('Заполните все поля анкеты')
-    const files: string[] = []
-    for (const [i, key] of ['doc_photo', 'selfie_photo'].entries()) {
-      const m = /^data:image\/(jpeg|png|webp);base64,(.+)$/.exec(String(b[key] ?? ''))
-      if (!m) return fail('Добавьте оба фото')
-      const bytes = Uint8Array.from(atob(m[2]), (c) => c.charCodeAt(0))
-      if (bytes.length > 6_000_000) return fail('Фото слишком большое')
-      const path = `${uid}/${Date.now()}-${i ? 'selfie' : 'doc'}.${m[1] === 'jpeg' ? 'jpg' : m[1]}`
-      const { error } = await db.storage.from('kyc').upload(path, bytes, { contentType: `image/${m[1]}`, upsert: true })
-      if (error) return fail('Не удалось загрузить фото', 500)
-      files.push(path)
+    if (!['id_card', 'passport', 'residence'].includes(b.doc_type)) return fail('Выберите документ')
+    const prof = await readProfile(user)
+    // Данные документа берутся из машиночитаемой зоны, проверенной на сервере; ручной ввод только если MRZ не считалась
+    const mrz = Array.isArray(b.mrz_lines) ? parseMrz(b.mrz_lines.slice(0, 3).map(String)) : null
+    const str = (k: string) => String(b[k] ?? '').trim().slice(0, 200)
+    const fields = {
+      full_name: str('full_name') || prof.full_name || '',
+      latin_name: mrz ? `${mrz.surname} ${mrz.given_names}`.trim() : '',
+      birth_date: mrz?.birth_date || str('birth_date'),
+      citizenship: mrz?.nationality || str('citizenship'),
+      doc_number: mrz?.doc_number || str('doc_number'),
+      expiry_date: mrz?.expiry_date || str('expiry_date'),
+      personal_number: mrz?.personal_number || str('personal_number'),
+      sex: mrz?.sex || '',
+      phone: user.phone ?? '',
+      address: str('address'),
     }
-    const kyc = Object.fromEntries([...need, 'address'].map((k) => [k, String(b[k] ?? '').slice(0, 200)]))
+    if (!fields.full_name || !fields.birth_date || !fields.doc_number) return fail('Отсканируйте документ или заполните данные')
+    const age = (Date.now() - new Date(fields.birth_date).getTime()) / (365.25 * 86400_000)
+    if (!(age >= 18 && age < 110)) return fail('Сервис доступен с 18 лет')
+    if (fields.expiry_date && new Date(fields.expiry_date).getTime() < Date.now() - 86400_000) return fail('Срок действия документа истёк')
+    const needBack = b.doc_type !== 'passport'
+    const keys = ['doc_front', ...(needBack ? ['doc_back'] : []), 'face', ...(b.files?.doc_face ? ['doc_face'] : [])]
+    const files: Record<string, string> = {}
+    for (const key of keys) {
+      const m = /^data:image\/(jpeg|png|webp);base64,(.+)$/.exec(String(b.files?.[key] ?? ''))
+      if (!m) {
+        if (key === 'doc_face') continue
+        return fail(key === 'face' ? 'Пройдите сканирование лица' : 'Отсканируйте документ')
+      }
+      const bytes = fromB64(m[2])
+      if (bytes.length > 4_000_000) return fail('Изображение слишком большое')
+      // Фото шифруются до записи в хранилище
+      const path = `${uid}/${Date.now()}-${key}.bin`
+      const { error } = await db.storage.from('kyc').upload(path, await encryptBytes(bytes), { contentType: 'application/octet-stream', upsert: true })
+      if (error) return fail('Не удалось сохранить файлы', 500)
+      files[key] = path
+    }
+    const live = b.liveness ?? {}
+    const face = b.face_match ?? {}
+    const score = Number(face.score)
+    // Автоматическая сверка: каждая проверка со своим итогом
+    const checks: { id: string; label: string; ok: boolean | null; note?: string }[] = [
+      { id: 'mrz', label: 'Машиночитаемая зона считана', ok: !!mrz, note: mrz ? mrz.format : 'данные введены вручную' },
+      { id: 'mrz_valid', label: 'Контрольные цифры документа', ok: mrz ? mrz.valid : null },
+      { id: 'expiry', label: 'Документ действителен', ok: fields.expiry_date ? new Date(fields.expiry_date).getTime() > Date.now() : null, note: fields.expiry_date || undefined },
+      { id: 'adult', label: 'Возраст 18+', ok: age >= 18 },
+      { id: 'name', label: 'ФИО совпадает с анкетой', ok: mrz && prof.full_name ? namesMatch(prof.full_name, mrz) : null },
+      { id: 'dob', label: 'Дата рождения совпадает с анкетой', ok: prof.birth_date ? prof.birth_date === fields.birth_date : null },
+      { id: 'liveness', label: 'Живое лицо (движения головой)', ok: !!live.passed },
+      { id: 'face', label: 'Лицо совпадает с фото в документе', ok: isFinite(score) ? !!face.passed : null, note: isFinite(score) ? `сходство ${Math.round(score * 100)}%` : 'не удалось сравнить' },
+    ]
+    const passed = checks.every((c) => c.ok === true)
+    const kyc: Record<string, unknown> = {
+      ...fields,
+      doc_type: b.doc_type,
+      mrz_lines: mrz?.lines ?? null,
+      liveness: { passed: !!live.passed, steps: Array.isArray(live.steps) ? live.steps.slice(0, 8).map(String) : [], method: String(live.method ?? '').slice(0, 40) },
+      checks,
+      auto_passed: passed,
+      files,
+      submitted_at: new Date().toISOString(),
+    }
     const { data: u } = await db
       .from('users')
-      .update({ kyc: { ...kyc, files }, kyc_status: 'pending', kyc_note: null, kyc_submitted_at: new Date().toISOString(), phone: user.phone ?? kyc.phone })
+      .update({ kyc: null, kyc_enc: await encryptJson(kyc), kyc_status: 'pending', kyc_note: null, kyc_submitted_at: new Date().toISOString() })
       .eq('id', uid)
       .select('*')
       .single()
     for (const a of ADMIN_IDS) await sendKycToAdmin(a, u)
-    const { data: fresh } = await db.from('users').select(USER_FIELDS).eq('id', uid).single()
-    return json(fresh)
+    return json(await publicUser(await getUser(uid)))
   }
 
   if (path === '/alerts' && method === 'GET') {
@@ -575,14 +1060,33 @@ async function api(req: Request, path: string): Promise<Response> {
 // deno-lint-ignore no-explicit-any
 function numify(o: any) {
   if (!o) return o
-  for (const k of ['amount_from', 'amount_to', 'rate', 'fee_pct', 'fee_amount', 'target']) if (o[k] != null) o[k] = Number(o[k])
+  for (const k of ['amount_from', 'amount_to', 'rate', 'fee_pct', 'fee_base_pct', 'fee_amount', 'bonus_used', 'bonus_used_kzt', 'target']) if (o[k] != null) o[k] = Number(o[k])
   return o
 }
 
 /* ---------------- уведомления о курсе (cron) ---------------- */
+/** Повторная отправка заявок, уведомление о которых не дошло до оператора (сбой сети, лимиты Telegram) */
+async function resendUnnotified() {
+  const { data } = await db
+    .from('orders')
+    .select('*, users(*)')
+    .eq('status', 'new')
+    .is('admin_msg_id', null)
+    .lt('created_at', new Date(Date.now() - 60_000).toISOString())
+    .limit(20)
+  for (const o of data ?? []) {
+    await withProfile(o.users)
+    const ids = await notifyAdmins(orderText(o, o.users, '🔁 ' + STATUS_HEAD.new + o.id), { reply_markup: orderKeyboard(o, o.users) })
+    if (ids[0]) await db.from('orders').update({ admin_msg_id: ids[0] }).eq('id', o.id)
+  }
+}
+
 async function checkAlerts() {
   const { data } = await db.from('rate_alerts').select('*').eq('active', true).limit(1000)
-  if (!data?.length) return { checked: 0, fired: 0 }
+  if (!data?.length) {
+    await resendUnnotified()
+    return { checked: 0, fired: 0 }
+  }
   const m = await getMarket()
   let fired = 0
   for (const a of data) {
@@ -597,8 +1101,10 @@ async function checkAlerts() {
       fired++
     }
   }
+  await resendUnnotified()
   // чистим старые коды входа
   await db.from('login_codes').delete().lt('created_at', new Date(Date.now() - 86400_000).toISOString())
+  await db.from('phone_logins').delete().lt('created_at', new Date(Date.now() - 86400_000).toISOString())
   return { checked: data.length, fired }
 }
 
@@ -613,12 +1119,7 @@ async function setup(origin: string) {
       ADMIN_IDS.map((id) =>
         tg('setMyCommands', {
           scope: { type: 'chat', chat_id: id },
-          commands: [
-            { command: 'orders', description: 'Активные заявки' },
-            { command: 'kyc', description: 'Анкеты на проверке' },
-            { command: 'stats', description: 'Статистика' },
-            { command: 'start', description: 'Открыть NEX' },
-          ],
+          commands: ADMIN_COMMANDS,
         }),
       ),
     ),

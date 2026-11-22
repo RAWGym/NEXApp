@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { AppProvider, useApp, type Tab } from './store'
-import { Backdrop, Spinner, ToastProvider } from './components/ui'
+import { Backdrop, ToastProvider } from './components/ui'
 import { IChart, IHistory, IHome, ISwap, IUser } from './components/Icons'
 import { Home } from './screens/Home'
 import { Exchange } from './screens/Exchange'
@@ -13,6 +13,7 @@ import { Kyc } from './screens/Kyc'
 import { DocsList, DocView, Faq, Install } from './screens/Docs'
 import { Alerts } from './screens/Alerts'
 import { Welcome } from './screens/Welcome'
+import { Loyalty, Personal } from './screens/Loyalty'
 import { api } from './lib/api'
 import { haptic, inTelegram, setBackButton, tgInit } from './lib/tg'
 
@@ -37,8 +38,8 @@ export default function App() {
     <ToastProvider>
       <Backdrop />
       {state === 'loading' && (
-        <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>
-          <Spinner />
+        <div className="splash">
+          <img src="/logo-light.svg" alt="NEX" />
         </div>
       )}
       {state === 'error' && (
@@ -81,6 +82,7 @@ function Shell() {
     const m = /^order_(\d+)$/.exec(p || '')
     if (m) push({ name: 'order', id: Number(m[1]) })
     if (p === 'kyc') push({ name: 'kyc' })
+    if (p === 'loyalty') push({ name: 'loyalty' })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -95,6 +97,8 @@ function Shell() {
       case 'alerts': content = <Alerts />; break
       case 'faq': content = <Faq />; break
       case 'install': content = <Install />; break
+      case 'loyalty': content = <Loyalty />; break
+      case 'personal': content = <Personal />; break
     }
   } else {
     content = { home: <Home />, exchange: <Exchange />, rates: <Rates />, history: <History />, profile: <Profile /> }[tab]

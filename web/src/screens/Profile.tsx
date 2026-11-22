@@ -1,9 +1,10 @@
 import { useApp } from '../store'
 import { TopBar, useToast } from '../components/ui'
 import { Avatar } from './Home'
-import { IBell, IChat, IChev, IDoc, IInfo, ILogout, IPhone, IQuestion, IShieldCheck, VerifiedBadge } from '../components/Icons'
+import { IBell, IChat, IChev, IDoc, IInfo, ILogout, IPhone, IQuestion, IShieldCheck, VerifiedBadge, IFlow, ILock, IScale, IId, IGift } from '../components/Icons'
+import { TierCard } from './Loyalty'
 import { CONFIG, DEMO } from '../config'
-import { addToHome, canAddToHome, inTelegram, isStandalone, openTgLink } from '../lib/tg'
+import { inTelegram, isStandalone, openTgLink } from '../lib/tg'
 import { api } from '../lib/api'
 import { fmtAmount } from '../lib/format'
 
@@ -23,7 +24,7 @@ export function Profile() {
   return (
     <div className="screen">
       <TopBar title="Профиль" />
-      <div className="card" style={{ textAlign: 'center', padding: '24px 16px' }}>
+      <div className="card hero-soft rise" style={{ textAlign: 'center', padding: '24px 16px' }}>
         <div style={{ display: 'flex', justifyContent: 'center' }}>
           <Avatar size={76} />
         </div>
@@ -44,26 +45,37 @@ export function Profile() {
         </div>
       </div>
 
+      <div className="mt12">
+        <TierCard />
+      </div>
+
       <h2 className="section">Аккаунт</h2>
-      <div className="list">
-        <Item icon={<IShieldCheck />} title="Верификация" sub={user?.kyc_status === 'verified' ? `Лимит до ${fmtAmount(CONFIG.maxKztVerified, 'KZT')} ₸ за заявку` : 'Анкета и документы'} right={<span className="xs" style={{ color: ks.c }}>{ks.t}</span>} onClick={() => push({ name: 'kyc' })} />
+      <div className="list stagger">
+        <Item
+          icon={<IId />}
+          title="Личные данные"
+          sub={user?.profile_done ? user.full_name ?? 'Заполнено' : 'ФИО, телефон, дата рождения'}
+          right={!user?.profile_done ? <span className="xs" style={{ color: 'var(--amber)' }}>Нужно заполнить</span> : undefined}
+          onClick={() => push({ name: 'personal' })}
+        />
+        <Item icon={<IShieldCheck />} title="Верификация" sub={user?.kyc_status === 'verified' ? `Лимит до ${fmtAmount(CONFIG.maxKztVerified, 'KZT')} ₸ за заявку` : `Для сумм больше ${fmtAmount(CONFIG.maxKzt, 'KZT')} ₸`} right={user?.kyc_status && user.kyc_status !== 'none' ? <span className="xs" style={{ color: ks.c }}>{ks.t}</span> : undefined} onClick={() => push({ name: 'kyc' })} />
+        <Item icon={<IGift />} title="Бонусы и приглашения" sub={user?.loyalty ? `${fmtAmount(user.loyalty.bonus_kzt, 'KZT')} ₸ бонусов · друзей: ${user.loyalty.referrals}` : 'Скидки на комиссию'} onClick={() => push({ name: 'loyalty' })} />
         <Item icon={<IBell />} title="Уведомления о курсе" sub="Сообщим в Telegram" onClick={() => push({ name: 'alerts' })} />
-        {canAddToHome() ? (
-          <Item icon={<IPhone />} title="Добавить на экран «Домой»" sub="Открывать NEX как приложение" onClick={() => addToHome()} />
-        ) : (
-          !isStandalone && !inTelegram && <Item icon={<IPhone />} title="Установить на iPhone" sub="NEX как отдельное приложение" onClick={() => push({ name: 'install' })} />
-        )}
+        {!isStandalone && <Item icon={<IPhone />} title="Установить на телефон" sub="NEX как отдельное приложение" onClick={() => push({ name: 'install' })} />}
       </div>
 
       <h2 className="section">Помощь</h2>
-      <div className="list">
+      <div className="list stagger">
         <Item icon={<IChat />} title="Поддержка" sub={`@${CONFIG.supportUsername}`} onClick={() => openTgLink(`https://t.me/${CONFIG.supportUsername}`)} />
         <Item icon={<IQuestion />} title="Частые вопросы" onClick={() => push({ name: 'faq' })} />
+        <Item icon={<IFlow />} title="Как проходит обмен" onClick={() => push({ name: 'doc', id: 'process' })} />
+        <Item icon={<ILock />} title="Безопасность и конфиденциальность" onClick={() => push({ name: 'doc', id: 'security' })} />
+        <Item icon={<IScale />} title="Законность сделки" onClick={() => push({ name: 'doc', id: 'legal' })} />
         <Item icon={<IDoc />} title="Документы" sub="Оферта, соглашение, политики" onClick={() => push({ name: 'docs' })} />
       </div>
 
       {!inTelegram && (
-        <div className="list mt16">
+        <div className="list mt16 stagger">
           <Item
             icon={<ILogout />}
             title="Выйти"

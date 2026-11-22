@@ -8,10 +8,15 @@ export const CONFIG = {
   legalName: (env.VITE_LEGAL_NAME as string | undefined) || 'NEX Digital Asset Exchange',
   country: (env.VITE_COUNTRY as string | undefined) || 'Республика Казахстан',
   email: (env.VITE_EMAIL as string | undefined) || 'support@nex.kz',
+  /** Номер лицензии/регистрации, если есть: показывается в разделе «Законность сделки» */
+  license: (env.VITE_LICENSE as string | undefined) || '',
+  /** Где физически хранятся данные (честно указывается в политике) */
+  dataRegion: (env.VITE_DATA_REGION as string | undefined) || 'Европейский союз (Франкфурт, Германия)',
   feePct: 3,
   /** Лимиты одной заявки в тенге (эквивалент) */
-  minKzt: 10_000,
-  maxKzt: 1_000_000,
+  minKzt: 5_000,
+  /** До этой суммы достаточно ФИО, телефона и даты рождения */
+  maxKzt: 300_000,
   maxKztVerified: 5_000_000,
 }
 

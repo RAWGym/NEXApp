@@ -1,5 +1,5 @@
 // Простой service worker: кэшируем оболочку приложения, данные всегда берём из сети
-const CACHE = 'nex-v1'
+const CACHE = 'nex-v2'
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(['/', '/logo-light.svg', '/icon-192.png'])))
   self.skipWaiting()

@@ -49,7 +49,7 @@ export function History() {
             </button>
           </div>
         ) : (
-          <div className="list">
+          <div className="list stagger" key={f}>
             {list.map((o) => (
               <button key={o.id} className="list-item" onClick={() => push({ name: 'order', id: o.id })}>
                 <div className="coin" style={{ background: 'rgba(234,225,215,0.07)' }}>

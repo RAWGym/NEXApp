@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import { useApp } from '../store'
-import { Coin, StatusBadge, Wave } from '../components/ui'
-import { IBell, IChat, IChart, IEye, IEyeOff, IShieldCheck, ISwap, IChev, VerifiedBadge } from '../components/Icons'
+import { Coin, CountUp, StatusBadge, Wave } from '../components/ui'
+import { IBell, IChat, IChart, IEye, IEyeOff, IShieldCheck, ISwap, IChev, VerifiedBadge, IFlow, ILock, IId, IGift } from '../components/Icons'
 import { Sparkline } from '../components/Chart'
 import { crossRate } from '../lib/market'
 import { fmtAmount, fmtDate, fmtMoney, fmtPct, fmtRate } from '../lib/format'
@@ -24,23 +24,24 @@ export function Home() {
 
   return (
     <div className="screen">
-      <div className="row between" style={{ marginBottom: 18 }}>
-        <div className="row">
-          <Avatar />
-          <div>
-            <div className="small muted">Привет,</div>
-            <div style={{ fontWeight: 600, fontSize: 17 }} className="row" >
-              <span className="ellipsis" style={{ maxWidth: 190 }}>{user?.first_name ?? ' '}</span>
-              {verified && <VerifiedBadge />}
-            </div>
-          </div>
+      <div className="brandbar rise">
+        <img src="/logo-light.svg" alt="NEX" />
+        <div className="right">
+          <button className="icon-btn" aria-label="Уведомления о курсе" onClick={() => push({ name: 'alerts' })}>
+            <IBell />
+          </button>
+          <button className="avatar-btn" aria-label="Профиль" onClick={() => setTab('profile')}>
+            <Avatar size={34} />
+            {verified && (
+              <span className="vb">
+                <VerifiedBadge size={16} />
+              </span>
+            )}
+          </button>
         </div>
-        <button className="icon-btn" aria-label="Уведомления о курсе" onClick={() => push({ name: 'alerts' })}>
-          <IBell />
-        </button>
       </div>
 
-      <div className="hero">
+      <div className="hero rise-1">
         <Wave className="wave" />
         <div style={{ position: 'relative' }}>
           <div className="row small" style={{ gap: 6, color: 'rgba(234,225,215,0.75)' }}>
@@ -49,7 +50,7 @@ export function Home() {
               {hideAmounts ? <IEyeOff size={18} /> : <IEye size={18} />}
             </button>
           </div>
-          <div className="big mt8">{hideAmounts ? '••••••' : `${fmtAmount(volumeKzt, 'KZT')} ₸`}</div>
+          <div className="big mt8">{hideAmounts ? '••••••' : <CountUp value={volumeKzt} format={(v) => `${fmtAmount(v, 'KZT')} ₸`} />}</div>
           <div className="small mt8" style={{ color: 'rgba(234,225,215,0.75)' }}>
             {completed.length ? `${completed.length} ${plural(completed.length, 'обмен', 'обмена', 'обменов')}` : 'Первый обмен ждёт вас'}
             {' · '}1 USD = {fmtRate(usdKzt)} ₸
@@ -57,7 +58,7 @@ export function Home() {
         </div>
       </div>
 
-      <div className="actions">
+      <div className="actions rise-2">
         <button className="action main" onClick={() => startExchange({})}>
           <ISwap />
           Обменять
@@ -72,19 +73,45 @@ export function Home() {
         </button>
       </div>
 
-      {!verified && (
-        <button className="card row mt12" style={{ width: '100%', textAlign: 'left' }} onClick={() => push({ name: 'kyc' })}>
+      {!user?.profile_done ? (
+        <button className="card row mt12 rise-3" style={{ width: '100%', textAlign: 'left' }} onClick={() => push({ name: 'personal' })}>
           <div className="coin" style={{ background: 'rgba(143,36,52,0.35)' }}>
-            <IShieldCheck size={20} />
+            <IId size={20} />
+          </div>
+          <div className="grow">
+            <div style={{ fontWeight: 600 }}>Заполните личные данные</div>
+            <div className="small muted">ФИО, телефон и дата рождения нужны для первой заявки</div>
+          </div>
+          <IChev className="chev" />
+        </button>
+      ) : (
+        !verified && (
+          <button className="card row mt12 rise-3" style={{ width: '100%', textAlign: 'left' }} onClick={() => push({ name: 'kyc' })}>
+            <div className="coin" style={{ background: 'rgba(143,36,52,0.35)' }}>
+              <IShieldCheck size={20} />
+            </div>
+            <div className="grow">
+              <div style={{ fontWeight: 600 }}>{user?.kyc_status === 'pending' ? 'Документы на проверке' : 'Подтвердите документ'}</div>
+              <div className="small muted">
+                {user?.kyc_status === 'pending' ? 'Мы сообщим в Telegram, как только проверим' : 'Обмен до 5 000 000 ₸ и отметка «Подтверждён», за 2 минуты'}
+              </div>
+            </div>
+            <IChev className="chev" />
+          </button>
+        )
+      )}
+
+      {user?.loyalty && (
+        <button className="card row mt12 rise-4 loyal-mini" style={{ width: '100%', textAlign: 'left' }} onClick={() => push({ name: 'loyalty' })}>
+          <div className={`tier-dot tier-${user.loyalty.tier}`}>
+            <IGift size={17} />
           </div>
           <div className="grow">
             <div style={{ fontWeight: 600 }}>
-              {user?.kyc_status === 'pending' ? 'Верификация на проверке' : 'Пройдите верификацию'}
+              {user.loyalty.tier_name} · комиссия {Math.max(1.5, 3 - user.loyalty.tier_off)}%
             </div>
             <div className="small muted">
-              {user?.kyc_status === 'pending'
-                ? 'Мы сообщим в Telegram, как только проверим анкету'
-                : 'Получите отметку «Подтверждён» и приоритет в обмене'}
+              {user.loyalty.bonus_kzt ? `${fmtAmount(user.loyalty.bonus_kzt, 'KZT')} ₸ бонусов · ` : ''}Пригласите друга и получайте бонусы
             </div>
           </div>
           <IChev className="chev" />
@@ -94,7 +121,7 @@ export function Home() {
       {active.length > 0 && (
         <>
           <h2 className="section">Активные заявки</h2>
-          <div className="list">
+          <div className="list stagger">
             {active.map((o) => (
               <button key={o.id} className="list-item" onClick={() => push({ name: 'order', id: o.id })}>
                 <div className="coin" style={{ background: 'rgba(234,225,215,0.07)' }}>
@@ -118,11 +145,25 @@ export function Home() {
         </>
       )}
 
+      <h2 className="section">Почему NEX</h2>
+      <div className="feature-grid stagger">
+        <button className="feature" style={{ textAlign: 'left' }} onClick={() => push({ name: 'doc', id: 'process' })}>
+          <IFlow size={22} />
+          <b>Как проходит обмен</b>
+          <span>4 шага от заявки до получения средств</span>
+        </button>
+        <button className="feature" style={{ textAlign: 'left' }} onClick={() => push({ name: 'doc', id: 'security' })}>
+          <ILock size={22} />
+          <b>Безопасность</b>
+          <span>Шифрование данных и конфиденциальность сделки</span>
+        </button>
+      </div>
+
       <h2 className="section">
         Курсы к тенге
         <button onClick={() => setTab('rates')}>Все</button>
       </h2>
-      <div className="list">
+      <div className="list stagger">
         {POPULAR.map((code) => {
           const c = cur(code)
           const ch = market.change24h[code]

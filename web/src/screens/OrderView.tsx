@@ -51,7 +51,7 @@ export function OrderView({ id }: { id: number }) {
     <div className="screen sub">
       <TopBar title={`Заявка №${o.id}`} onBack={pop} />
 
-      <div className="card" style={{ textAlign: 'center', padding: '22px 16px' }}>
+      <div className="card hero-soft rise" style={{ textAlign: 'center', padding: '22px 16px' }}>
         <div className="row" style={{ justifyContent: 'center', gap: 12 }}>
           <Coin code={o.from_cur} size="lg" />
           <ISwap className="muted" />
@@ -78,8 +78,8 @@ export function OrderView({ id }: { id: number }) {
       )}
 
       {!failed && (
-        <div className="card mt12">
-          <div className="steps">
+        <div className="card mt12 rise-1">
+          <div className="steps stagger">
             {steps.map((s, i) => (
               <div key={i} className={`step ${s.done ? 'done' : i === curIdx ? 'cur' : ''}`}>
                 <div className="dotc">{s.done && <ICheck size={13} strokeWidth={3} />}</div>

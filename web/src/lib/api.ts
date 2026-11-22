@@ -2,6 +2,7 @@ import { CONFIG, DEMO } from '../config'
 import type { CurrencyCode } from './currencies'
 import { crossRate, fetchMarketDirect, FALLBACK, type Market } from './market'
 import { inTelegram, TG } from './tg'
+import { pricing, type Discount } from './pricing'
 
 export type OrderStatus = 'new' | 'accepted' | 'completed' | 'rejected' | 'cancelled'
 export type KycStatus = 'none' | 'pending' | 'verified' | 'rejected'
@@ -13,9 +14,34 @@ export interface User {
   username?: string | null
   photo_url?: string | null
   phone?: string | null
+  phone_verified?: boolean
   kyc_status: KycStatus
   kyc_note?: string | null
   created_at?: string
+  profile_done?: boolean
+  full_name?: string | null
+  birth_date?: string | null
+  loyalty?: Loyalty
+}
+
+export interface Loyalty {
+  tier: string
+  tier_name: string
+  tier_off: number
+  next_tier: { id: string; name: string; min: number; off: number } | null
+  volume_kzt: number
+  bonus_kzt: number
+  ref_code: string
+  ref_link: string
+  referrals: number
+  ref_earned_kzt: number
+  welcome: boolean
+  completed: number
+}
+export interface ProfileForm {
+  full_name: string
+  birth_date: string
+  phone: string
 }
 
 export interface Order {
@@ -26,7 +52,11 @@ export interface Order {
   amount_to: number
   rate: number
   fee_pct: number
+  fee_base_pct?: number | null
+  discounts?: Discount[] | null
   fee_amount: number
+  bonus_used?: number
+  bonus_used_kzt?: number
   method: string
   details?: string | null
   note?: string | null
@@ -54,18 +84,25 @@ export interface NewOrder {
   method: string
   details?: string
   note?: string
+  use_bonus?: boolean
 }
 
+export type DocType = 'id_card' | 'passport' | 'residence'
 export interface KycForm {
-  full_name: string
-  birth_date: string
-  citizenship: string
-  doc_type: string
-  doc_number: string
-  phone: string
-  address: string
-  doc_photo?: string // dataURL jpeg
-  selfie_photo?: string
+  doc_type: DocType
+  /** Строки машиночитаемой зоны: сервер сам проверяет их и берёт из них данные */
+  mrz_lines?: string[]
+  /** Заполняются вручную, только если MRZ не считалась */
+  full_name?: string
+  birth_date?: string
+  citizenship?: string
+  doc_number?: string
+  expiry_date?: string
+  address?: string
+  /** dataURL jpeg: doc_front, doc_back (кроме паспорта), face, doc_face (лицо из документа) */
+  files: { doc_front?: string; doc_back?: string; face?: string; doc_face?: string }
+  liveness: { passed: boolean; steps: string[]; method: string }
+  face_match?: { score: number; passed: boolean } | null
 }
 
 const TOKEN_KEY = 'nex.token'
@@ -87,7 +124,16 @@ const store = {
   },
 }
 
-export class ApiError extends Error {}
+export class ApiError extends Error {
+  status: number
+  data: Record<string, unknown>
+  constructor(msg: string, status = 0, data: Record<string, unknown> = {}) {
+    super(msg)
+    this.status = status
+    this.data = data
+  }
+}
+export const ORDER_COOLDOWN_SEC = 300
 
 async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = store.get(TOKEN_KEY)
@@ -102,7 +148,7 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   const j = await r.json().catch(() => ({}))
   if (!r.ok) {
     if (r.status === 401) store.set(TOKEN_KEY, null)
-    throw new ApiError(j.error || 'Ошибка сети. Попробуйте ещё раз.')
+    throw new ApiError(j.error || 'Ошибка сети. Попробуйте ещё раз.', r.status, j)
   }
   return j as T
 }
@@ -120,14 +166,32 @@ const demo = {
     store.set('nex.demo.' + k, JSON.stringify(v))
   },
 }
-const demoUser = (): User =>
-  demo.load<User>('user', {
+const demoUser = (): User => {
+  const u = demo.load<User>('user', {
     id: 100000001,
     first_name: TG?.initDataUnsafe?.user?.first_name || 'Максим',
     username: TG?.initDataUnsafe?.user?.username || 'maxim',
     kyc_status: 'none',
     created_at: new Date().toISOString(),
   })
+  const done = demo.load<Order[]>('orders', []).filter((o) => o.status === 'completed')
+  const vol = done.reduce((s, o) => s + o.amount_from * (o.from_cur === 'KZT' ? 1 : 500), 0)
+  u.loyalty = {
+    tier: vol >= 1_000_000 ? 'silver' : 'standard',
+    tier_name: vol >= 1_000_000 ? 'Silver' : 'Standard',
+    tier_off: vol >= 1_000_000 ? 0.25 : 0,
+    next_tier: vol >= 1_000_000 ? { id: 'gold', name: 'Gold', min: 5_000_000, off: 0.5 } : { id: 'silver', name: 'Silver', min: 1_000_000, off: 0.25 },
+    volume_kzt: vol,
+    bonus_kzt: demo.load('bonus', 1200),
+    ref_code: 'NEXDEMO',
+    ref_link: `https://t.me/${CONFIG.botUsername}?start=ref_NEXDEMO`,
+    referrals: 2,
+    ref_earned_kzt: 1200,
+    welcome: false,
+    completed: done.length,
+  }
+  return u
+}
 let marketCache: { t: number; m: Market } | null = null
 
 /* ---------------- Публичное API ---------------- */
@@ -147,8 +211,8 @@ export const api = {
   },
 
   /** Вход в PWA через бота: получаем код, пользователь подтверждает его в Telegram */
-  async loginStart(): Promise<{ code: string; url: string }> {
-    if (DEMO) return { code: 'demo', url: `https://t.me/${CONFIG.botUsername}` }
+  async loginStart(): Promise<{ code: string; pin: string; url: string }> {
+    if (DEMO) return { code: 'demo', pin: '0000', url: `https://t.me/${CONFIG.botUsername}` }
     return call('/auth/link/start', { method: 'POST' })
   },
   async loginPoll(code: string): Promise<boolean> {
@@ -160,6 +224,44 @@ export const api = {
     if (r.token) store.set(TOKEN_KEY, r.token)
     return !!r.token
   },
+  /** Вход по номеру телефона: код приходит в Telegram от бота */
+  async phoneStart(phone: string): Promise<{ sid: string; sent: boolean; url?: string }> {
+    if (DEMO) {
+      const linked = demo.load('phoneLinked', false)
+      return linked ? { sid: 'demo', sent: true } : { sid: 'demo', sent: false, url: `https://t.me/${CONFIG.botUsername}` }
+    }
+    return call('/auth/phone/start', { method: 'POST', body: JSON.stringify({ phone }) })
+  },
+  async phoneStatus(sid: string): Promise<boolean> {
+    if (DEMO) {
+      demo.save('phoneLinked', true)
+      return true
+    }
+    return (await call<{ sent: boolean }>(`/auth/phone/status?sid=${encodeURIComponent(sid)}`)).sent
+  },
+  async phoneResend(sid: string): Promise<void> {
+    if (DEMO) return
+    await call('/auth/phone/resend', { method: 'POST', body: JSON.stringify({ sid }) })
+  },
+  async phoneVerify(sid: string, code: string): Promise<void> {
+    if (DEMO) {
+      if (code !== '123456') throw new ApiError('Неверный код. В демо-режиме код 123456', 400)
+      demo.save('loggedIn', true)
+      return
+    }
+    const r = await call<{ token: string }>('/auth/phone/verify', { method: 'POST', body: JSON.stringify({ sid, code }) })
+    store.set(TOKEN_KEY, r.token)
+  },
+
+  async saveProfile(f: ProfileForm): Promise<User> {
+    if (DEMO) {
+      const u = { ...demoUser(), ...f, profile_done: true }
+      demo.save('user', u)
+      return demoUser()
+    }
+    return call<User>('/profile', { method: 'POST', body: JSON.stringify(f) })
+  },
+
   logout() {
     store.set(TOKEN_KEY, null)
     demo.save('loggedIn', false)
@@ -192,17 +294,37 @@ export const api = {
       const m = await api.market()
       const rate = crossRate(m, o.from, o.to)
       const gross = o.amount * rate
-      const fee = (gross * CONFIG.feePct) / 100
+      const u = demoUser()
+      if (!u.profile_done) throw new ApiError('Заполните ФИО, телефон и дату рождения', 400, { code: 'profile' })
+      const kzt = o.amount * crossRate(m, o.from, 'KZT')
+      const price = pricing(u.loyalty!.volume_kzt, kzt, u.loyalty!.welcome)
+      const fee = (gross * price.fee) / 100
+      const feeKzt = fee * crossRate(m, o.to, 'KZT')
+      const bonusKzt = o.use_bonus ? Math.floor(Math.min(u.loyalty!.bonus_kzt, feeKzt * 0.5)) : 0
+      const bonusTo = bonusKzt * crossRate(m, 'KZT', o.to)
       const list = demo.load<Order[]>('orders', [])
+      const dup = list.find(
+        (x) => (x.status === 'new' || x.status === 'accepted') && x.from_cur === o.from && x.to_cur === o.to && Math.abs(x.amount_from - o.amount) <= o.amount * 0.01,
+      )
+      if (dup) throw new ApiError(`Такая заявка №${dup.id} уже на рассмотрении. Дождитесь ответа оператора.`, 409, { code: 'duplicate', order_id: dup.id })
+      const last = list[0] ? (Date.now() - new Date(list[0].created_at).getTime()) / 1000 : Infinity
+      if (last < ORDER_COOLDOWN_SEC) {
+        const sec = Math.ceil(ORDER_COOLDOWN_SEC - last)
+        throw new ApiError(`Новую заявку можно создать через ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`, 429, { code: 'cooldown', retry_after: sec })
+      }
       const order: Order = {
         id: 1000 + list.length + 1,
         from_cur: o.from,
         to_cur: o.to,
         amount_from: o.amount,
-        amount_to: gross - fee,
+        amount_to: gross - fee + bonusTo,
         rate,
-        fee_pct: CONFIG.feePct,
+        fee_pct: price.fee,
+        fee_base_pct: CONFIG.feePct,
+        discounts: price.discounts,
         fee_amount: fee,
+        bonus_used: bonusTo,
+        bonus_used_kzt: bonusKzt,
         method: o.method,
         details: o.details,
         note: o.note,
@@ -210,6 +332,7 @@ export const api = {
         created_at: new Date().toISOString(),
       }
       demo.save('orders', [order, ...list])
+      if (bonusKzt) demo.save('bonus', u.loyalty!.bonus_kzt - bonusKzt)
       return order
     }
     return call<Order>('/orders', { method: 'POST', body: JSON.stringify(o) })

@@ -58,3 +58,40 @@ export function VerifiedBadge({ size = 18 }: { size?: number }) {
     </svg>
   )
 }
+
+export const IFace = mk(<><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2" /><path d="M9 10v.5M15 10v.5" /><path d="M12 10v3.5h-1" /><path d="M9.5 16.2c1.4 1 3.6 1 5 0" /></>)
+export const ILock = mk(<><rect x="5" y="10.5" width="14" height="9.5" rx="2" /><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" /></>)
+export const IScale = mk(<><path d="M12 4v16M7 20h10" /><path d="M5 8h14" /><path d="m5 8-2.5 6a3 3 0 0 0 5 0zM19 8l-2.5 6a3 3 0 0 0 5 0z" /></>)
+export const IFlow = mk(<><circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="18" r="2.5" /><path d="M8.5 6H15a3 3 0 0 1 3 3v6.5M6 8.5V15a3 3 0 0 0 3 3h6.5" /></>)
+export const IChevLeft = mk(<path d="m15 5-7 7 7 7" />)
+export const ITelegram = ({ size = 22, ...p }: P) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" {...p}>
+    <path d="M20.7 4.3 3.4 11c-1.2.5-1.2 1.2-.2 1.5l4.4 1.4 1.7 5.2c.2.6.4.8.9.8.4 0 .6-.2.9-.4l2.1-2.1 4.4 3.3c.8.4 1.4.2 1.6-.8l2.9-13.7c.3-1.2-.4-1.7-1.4-1.3ZM9 14.1l8.8-5.6c.4-.3.8-.1.5.2l-7.4 6.7-.3 3.2z" />
+  </svg>
+)
+export const IGift = mk(
+  <>
+    <rect x="3.5" y="8" width="17" height="4" rx="1" />
+    <path d="M5 12v7.5a.5.5 0 0 0 .5.5h13a.5.5 0 0 0 .5-.5V12M12 8v12M12 8S10.5 4 8 4a2 2 0 0 0 0 4h4Zm0 0s1.5-4 4-4a2 2 0 0 1 0 4h-4Z" />
+  </>,
+)
+export const ICrown = mk(<path d="m3.5 8 4.5 4 4-6 4 6 4.5-4-2 10h-13z" />)
+export const IUsers = mk(
+  <>
+    <circle cx="9" cy="8.5" r="3.2" />
+    <path d="M3.5 19c.6-3 2.9-4.8 5.5-4.8s4.9 1.8 5.5 4.8M15.5 5.6a3 3 0 0 1 0 5.8M17.5 14.6c1.6.6 2.7 2.1 3 4.4" />
+  </>,
+)
+export const ICopy = mk(
+  <>
+    <rect x="8.5" y="8.5" width="11" height="11" rx="2.5" />
+    <path d="M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8A1.5 1.5 0 0 0 6 15.5h2.5" />
+  </>,
+)
+export const IId = mk(
+  <>
+    <rect x="3" y="5" width="18" height="14" rx="2.5" />
+    <circle cx="9" cy="11" r="2.2" />
+    <path d="M5.8 16.2c.5-1.5 1.7-2.3 3.2-2.3s2.7.8 3.2 2.3M14.5 10h4M14.5 13.5h3" />
+  </>,
+)
