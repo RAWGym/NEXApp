@@ -512,12 +512,16 @@ async function onMessage(m: any) {
     return
   }
 
+  // Панель: сотрудникам из команды и администраторам бота (только они могут создать владельца)
+  if (cmd === '/panel') {
+    const { data: staff } = await db.from('admin_users').select('id').eq('tg_id', from.id).maybeSingle()
+    if (staff || isAdmin(from.id)) return adminBotCommand(from, arg)
+  }
   if (!isAdmin(from.id)) {
     return send(from.id, 'Чтобы создать заявку на обмен, откройте приложение.', { reply_markup: appButton('Открыть NEX') })
   }
 
   // ----- команды администратора -----
-  if (cmd === '/panel') return adminBotCommand(from, arg)
   if (cmd === '/orders') {
     const { data } = await db.from('orders').select('*, users(*)').in('status', ['new', 'accepted']).order('created_at').limit(20)
     if (!data?.length) return send(from.id, 'Активных заявок нет.')
