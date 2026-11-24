@@ -5,9 +5,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 VERSION=$(node -p "require('./package.json').version")
-npx electron-builder --win portable zip --x64
-NSIS=$(ls -d ~/.cache/electron-builder/nsis-3*/nsis-3*/ | grep -v '\.7z' | head -1)
-RES=$(ls -d ~/.cache/electron-builder/nsis-resources-*/nsis-resources-*/ | grep -v '\.7z' | head -1)
+npx electron-builder --win portable zip --x64 --publish never
+CACHE="${ELECTRON_BUILDER_CACHE:-$HOME/.cache/electron-builder}"
+NSIS=$(ls -d "$CACHE"/nsis-3*/nsis-3*/ | grep -v '\.7z' | head -1)
+RES=$(ls -d "$CACHE"/nsis-resources-*/nsis-resources-*/ | grep -v '\.7z' | head -1)
 chmod +x "$NSIS/linux/makensis"
 NSISDIR="$NSIS" "$NSIS/linux/makensis" -V2 -DVERSION="$VERSION" \
   "-X!addplugindir /x86-unicode $RES/plugins/x86-unicode" build/installer.nsi

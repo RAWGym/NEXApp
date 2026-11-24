@@ -4,6 +4,7 @@
 
 const { app, BrowserWindow, Menu, Tray, nativeImage, session, shell, dialog } = require('electron')
 const path = require('path')
+const { startUpdater } = require('./updater')
 
 const ORIGIN = 'https://nex-app-rho.vercel.app'
 const START = ORIGIN + '/admin/'
@@ -166,16 +167,27 @@ function show() {
   win.focus()
 }
 
+let updater = null
+let updState = ''
+
+function trayMenu() {
+  const upd = updState === 'downloading' ? 'Загружается обновление…' : updState === 'ready' ? 'Установить обновление' : 'Проверить обновления'
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Открыть панель', click: show },
+    { label: 'Обновить страницу', click: () => { show(); win.webContents.reload() } },
+    { type: 'separator' },
+    { label: upd, enabled: updState !== 'downloading' && updState !== 'checking', click: () => updater && updater.check(true) },
+    { label: `Версия ${app.getVersion()}`, enabled: false },
+    { type: 'separator' },
+    { label: 'Выйти', click: () => { quitting = true; app.quit() } },
+  ]))
+}
+
 function createTray() {
   const img = nativeImage.createFromPath(path.join(__dirname, '..', 'build', 'icon.png')).resize({ width: 16, height: 16 })
   tray = new Tray(img)
   tray.setToolTip('NEX Admin')
-  tray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'Открыть панель', click: show },
-    { label: 'Обновить', click: () => { show(); win.webContents.reload() } },
-    { type: 'separator' },
-    { label: 'Выйти', click: () => { quitting = true; app.quit() } },
-  ]))
+  trayMenu()
   tray.on('click', show)
 }
 
@@ -197,6 +209,18 @@ function boot() {
 
   createTray()
   createWindow()
+
+  // Обновление самой программы (интерфейс панели обновляется сам, с сайта)
+  updater = startUpdater({
+    getWin: () => win,
+    onState: (st, v) => {
+      updState = st
+      trayMenu()
+      if (st === 'downloading') tray.setToolTip(`NEX Admin: загружается версия ${v}`)
+      else if (st === 'ready') tray.setToolTip(`NEX Admin: готова версия ${v}`)
+      else tray.setToolTip('NEX Admin')
+    },
+  })
 }
 
 app.on('before-quit', () => { quitting = true })

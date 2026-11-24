@@ -66,6 +66,12 @@ Section "Install"
   WriteRegDWORD HKCU "${UNINSTKEY}" "NoRepair" 1
 SectionEnd
 
+; После тихой установки (обновление из программы) сразу запускаем новую версию
+Function .onInstSuccess
+  IfSilent 0 +2
+    Exec '"$INSTDIR\${EXE}"'
+FunctionEnd
+
 Section "Uninstall"
   nsExec::Exec 'taskkill /F /IM "${EXE}"'
   Sleep 500

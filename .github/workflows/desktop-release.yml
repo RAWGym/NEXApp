@@ -1,0 +1,35 @@
+# Сборка и выпуск программы NEX Admin для Windows.
+# Срабатывает, когда в main меняется папка desktop/. Если версия в desktop/package.json
+# уже выпущена, ничего не делает. Установленные программы подхватят новый релиз сами.
+name: Desktop release
+
+on:
+  push:
+    branches: [main]
+    paths: ['desktop/**']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: desktop
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: bash scripts/release.sh

@@ -114,6 +114,48 @@ function Shell({ me, onOut }: { me: Me; onOut: () => void }) {
     else setNav({ page: 'users', open: { kind: 'user', id: e.id } })
   }, [setNav])
 
+  // Новая версия панели: сверяем номер сборки раз в минуту и при возврате к окну.
+  // Если окно скрыто, обновляемся сами; если открыто, показываем плашку с кнопкой.
+  const [update, setUpdate] = useState(false)
+  const snooze = useRef(0)
+  useEffect(() => {
+    let stop = false
+    const check = async () => {
+      try {
+        const r = await fetch('/version.json?t=' + Date.now(), { cache: 'no-store' })
+        if (!r.ok) return
+        const v = (await r.json()) as { build?: string }
+        if (stop || !v.build || v.build === __BUILD_ID__) return
+        // Защита от круговой перезагрузки: сами перезагружаемся только один раз на каждую новую сборку
+        let tried = ''
+        try {
+          tried = sessionStorage.getItem('nex.admin.upd') ?? ''
+        } catch {
+          /* хранилище недоступно */
+        }
+        if (document.hidden && tried !== v.build) {
+          try {
+            sessionStorage.setItem('nex.admin.upd', v.build)
+          } catch {
+            /* хранилище недоступно */
+          }
+          location.reload()
+        } else if (Date.now() > snooze.current) setUpdate(true)
+      } catch {
+        /* нет сети: проверим позже */
+      }
+    }
+    const t = window.setInterval(check, 60_000)
+    const onVis = () => document.visibilityState === 'visible' && check()
+    document.addEventListener('visibilitychange', onVis)
+    check()
+    return () => {
+      stop = true
+      clearInterval(t)
+      document.removeEventListener('visibilitychange', onVis)
+    }
+  }, [])
+
   // Автообновление: опрос ленты событий раз в 15 секунд, пока вкладка открыта
   useEffect(() => {
     let stop = false
@@ -266,6 +308,17 @@ function Shell({ me, onOut }: { me: Me; onOut: () => void }) {
         {page === 'team' && <Team {...props} />}
         {page === 'audit' && <Audit {...props} />}
       </main>
+      {update && (
+        <div className="upd" role="status">
+          <span className="upd__dot" />
+          <div className="upd__text">
+            <b>Вышла новая версия панели</b>
+            <small>Обновление займёт секунду, вход сохранится</small>
+          </div>
+          <button className="btn ghost sm" onClick={() => ((snooze.current = Date.now() + 30 * 60_000), setUpdate(false))}>Позже</button>
+          <button className="btn primary sm" onClick={() => location.reload()}>Обновить</button>
+        </div>
+      )}
     </>
   )
 }

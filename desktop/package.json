@@ -1,14 +1,16 @@
 {
   "name": "nex-admin",
   "productName": "NEX Admin",
-  "version": "1.0.0",
+  "version": "1.1.0",
+  "releaseNotes": "Обновления прямо в программе: проверка раз в 4 часа, загрузка с проверкой контрольной суммы и установка по кнопке. Пункт «Проверить обновления» в меню значка.",
   "description": "NEX: панель управления",
   "author": "NEX",
   "private": true,
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "dist:win": "bash scripts/make-installer.sh"
+    "dist:win": "bash scripts/make-installer.sh",
+    "release": "bash scripts/release.sh"
   },
   "devDependencies": {
     "electron": "45.2.3",
