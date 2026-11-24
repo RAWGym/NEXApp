@@ -136,7 +136,7 @@ function Shell({ me, onOut }: { me: Me; onOut: () => void }) {
           for (const e of r.items.slice(0, 3)) {
             const m = eventText(e)
             toast({ ...m, kind: e.type === 'order.completed' ? 'good' : e.type === 'user.new' ? 'info' : 'warn', onClick: () => go(e) })
-            if (p.desktop && document.hidden && 'Notification' in window && Notification.permission === 'granted' && e.type !== 'user.new') {
+            if (p.desktop && (document.hidden || !document.hasFocus()) && 'Notification' in window && Notification.permission === 'granted' && e.type !== 'user.new') {
               const n = new Notification(m.title, { body: m.text, tag: e.type + e.id, icon: '/icon-192.png' })
               n.onclick = () => {
                 focus()

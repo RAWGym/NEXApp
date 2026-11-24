@@ -1,0 +1,50 @@
+{
+  "name": "nex-admin",
+  "productName": "NEX Admin",
+  "version": "1.0.0",
+  "description": "NEX: панель управления",
+  "author": "NEX",
+  "private": true,
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist:win": "bash scripts/make-installer.sh"
+  },
+  "devDependencies": {
+    "electron": "45.2.3",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "kz.noirex.admin",
+    "productName": "NEX Admin",
+    "copyright": "NEX",
+    "asar": true,
+    "files": ["src/**/*", "build/icon.png", "package.json"],
+    "directories": { "output": "dist", "buildResources": "build" },
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true,
+      "grantFileProtocolExtraPrivileges": false
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "artifactName": "NEX-Admin-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "NEX Admin",
+      "artifactName": "NEX-Admin-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "NEX-Admin-Portable-${version}.${ext}"
+    }
+  }
+}
