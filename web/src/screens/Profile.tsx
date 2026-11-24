@@ -56,10 +56,10 @@ export function Profile() {
           icon={<IId />}
           title="Личные данные"
           sub={user?.profile_done ? user.full_name ?? 'Заполнено' : 'ФИО, телефон, дата рождения'}
-          right={!user?.profile_done ? <span className="xs" style={{ color: 'var(--amber)' }}>Нужно заполнить</span> : undefined}
+          right={!user?.profile_done ? <span className="tag amber">Заполнить</span> : undefined}
           onClick={() => push({ name: 'personal' })}
         />
-        <Item icon={<IShieldCheck />} title="Верификация" sub={user?.kyc_status === 'verified' ? `Лимит до ${fmtAmount(CONFIG.maxKztVerified, 'KZT')} ₸ за заявку` : `Для сумм больше ${fmtAmount(CONFIG.maxKzt, 'KZT')} ₸`} right={user?.kyc_status && user.kyc_status !== 'none' ? <span className="xs" style={{ color: ks.c }}>{ks.t}</span> : undefined} onClick={() => push({ name: 'kyc' })} />
+        <Item icon={<IShieldCheck />} title="Верификация" sub={user?.kyc_status === 'verified' ? `Лимит до ${fmtAmount(CONFIG.maxKztVerified, 'KZT')} ₸ за заявку` : `Для сумм больше ${fmtAmount(CONFIG.maxKzt, 'KZT')} ₸`} right={user?.kyc_status && user.kyc_status !== 'none' ? <span className="tag" style={{ color: ks.c }}>{ks.t}</span> : undefined} onClick={() => push({ name: 'kyc' })} />
         <Item icon={<IGift />} title="Бонусы и приглашения" sub={user?.loyalty ? `${fmtAmount(user.loyalty.bonus_kzt, 'KZT')} ₸ бонусов · друзей: ${user.loyalty.referrals}` : 'Скидки на комиссию'} onClick={() => push({ name: 'loyalty' })} />
         {!inTelegram && <Item icon={<IFace />} title="Вход и уведомления" sub="Face ID, код-пароль, push" onClick={() => push({ name: 'security' })} />}
         <Item icon={<IBell />} title="Уведомления о курсе" sub="Сообщим, когда курс дойдёт до цели" onClick={() => push({ name: 'alerts' })} />
@@ -103,10 +103,12 @@ export function Item({ icon, title, sub, right, onClick }: { icon?: React.ReactN
     <button className="list-item" onClick={onClick}>
       {icon && <div className="muted" style={{ display: 'flex' }}>{icon}</div>}
       <div className="grow">
-        <div style={{ fontWeight: 500 }}>{title}</div>
+        <div className="item-head">
+          <span>{title}</span>
+          {right}
+        </div>
         {sub && <div className="sub">{sub}</div>}
       </div>
-      {right}
       <IChev className="chev" size={18} />
     </button>
   )

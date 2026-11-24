@@ -260,9 +260,9 @@ export function Exchange() {
       )}
 
       <h2 className="section" style={{ marginTop: 22 }}>Способ получения</h2>
-      <div className="chips" style={{ margin: 0, padding: 0, flexWrap: 'wrap' }}>
+      <div className="segment seg-methods" role="tablist">
         {METHODS.map((m) => (
-          <button key={m.id} className={`chip ${method === m.id ? 'on' : ''}`} onClick={() => setMethod(m.id)}>
+          <button key={m.id} role="tab" aria-selected={method === m.id} className={method === m.id ? 'on' : ''} onClick={() => setMethod(m.id)}>
             {m.label}
           </button>
         ))}

@@ -224,7 +224,7 @@ export function Finance({ tick }: PageProps) {
             </div>
             <AreaChart key={range} data={s.series as never} k="fee" k2="bonus" bucket={s.bucket} label="Комиссия" label2="Бонусы" fmt={(n) => short(n) + ' ₸'} height={260} />
           </div>
-          <div className="card s4 rise" style={{ ['--i' as string]: 5 }}>
+          <div className="card s4 wmd rise" style={{ ['--i' as string]: 5 }}>
             <div className="chead"><h3>Обязательства</h3></div>
             <div className="kv" style={{ gridTemplateColumns: '1fr auto' }}>
               <div>Бонусы на счетах клиентов</div>

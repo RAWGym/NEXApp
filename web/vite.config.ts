@@ -6,6 +6,8 @@ import { defineConfig } from 'vite'
 export default defineConfig({
   plugins: [react()],
   build: {
+    // Шрифты всегда отдельными файлами: CSP разрешает шрифты только со своего домена (font-src 'self')
+    assetsInlineLimit: (file) => (file.endsWith('.woff2') || file.endsWith('.woff') ? false : undefined),
     rollupOptions: {
       input: {
         main: resolve(__dirname, 'index.html'),

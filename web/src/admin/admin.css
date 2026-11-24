@@ -33,7 +33,7 @@ html, body, #root { margin: 0; min-height: 100%; }
 body {
   background: var(--bg);
   color: var(--ink);
-  font: 500 14px/1.45 'Manrope', system-ui, -apple-system, sans-serif;
+  font: 500 14px/1.45 'Manrope Variable', 'Manrope', system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
   font-feature-settings: 'tnum' 1;
 }
@@ -374,3 +374,52 @@ select.input option { background: #1c0b0f; }
 .mono { font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 12.5px; }
 .link { color: var(--accent); font-weight: 600; text-decoration: underline; text-underline-offset: 3px; text-decoration-color: rgba(234, 225, 215, 0.3); }
 .note { padding: 12px 14px; border-radius: 14px; background: rgba(224, 178, 92, 0.08); box-shadow: inset 0 0 0 1px rgba(224, 178, 92, 0.18); color: #ead3a6; font-size: 12.5px; line-height: 1.5; }
+
+/* ---------- полировка 2026-11-24: границы, адаптивность, типографика ---------- */
+/* Поле кода: шесть равных ячеек, никогда не шире карточки */
+.otp { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.otp input { width: 100%; min-width: 0; padding: 0; font-variant-numeric: tabular-nums; }
+.otp input:not(:placeholder-shown), .otp input[value]:not([value='']) { box-shadow: inset 0 0 0 1px rgba(234, 225, 215, 0.28); }
+
+/* Цифры ровными колонками, номера и ID тем же шрифтом, что и всё остальное */
+.mono { font-family: inherit; font-size: inherit; font-variant-numeric: tabular-nums; letter-spacing: 0.01em; color: var(--muted); }
+h1, h2, h3, .card__title, .auth h1 { text-wrap: balance; }
+p, .lead, .note, .auth__foot { text-wrap: pretty; }
+
+/* Строки «ключ: значение» выровнены по центру, бейджи не прыгают */
+.kv > div { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 42px; }
+
+/* Панель фильтров: поиск и CSV держатся вместе */
+.search { min-width: 220px; }
+.seg__pill { transition: left 0.45s var(--ease), width 0.45s var(--ease); }
+
+/* Сетка 1024–1280: без пустых мест */
+@media (max-width: 1280px) and (min-width: 861px) {
+  .s7 { grid-column: span 6; }
+  .grid > .s4.wmd { grid-column: span 12; }
+}
+
+/* Очень широкие мониторы: контент не растягивается бесконечно */
+.shell > * { max-width: 1760px; }
+
+/* Телефон: фильтры прокручиваются, док помещается */
+@media (max-width: 860px) {
+  .toolbar { gap: 8px; }
+  .toolbar .seg { max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+  .toolbar .seg::-webkit-scrollbar { display: none; }
+  .toolbar .grow { display: none; }
+  .search { min-width: 0; flex: 1 1 200px; }
+  .dock { max-width: calc(100vw - 24px); overflow-x: auto; scrollbar-width: none; gap: 2px; padding: 6px 8px; }
+  .dock::-webkit-scrollbar { display: none; }
+  .dock__btn { width: 40px; height: 40px; flex: none; }
+  .shell { padding: 16px 14px 96px; }
+}
+@media (max-width: 600px) {
+  .top { gap: 10px; margin-bottom: 16px; }
+  .top__title h1 { font-size: 24px; }
+  .top__title p { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .top__right { gap: 6px; }
+  .live { font-size: 0; gap: 0; padding: 0 12px; }
+  .mebtn { padding: 4px; }
+  .mebtn > span:not(.avatar) { display: none; }
+}

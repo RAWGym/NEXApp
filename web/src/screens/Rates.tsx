@@ -37,8 +37,8 @@ export function Rates() {
           </div>
           <div className="row xs faint mt16" style={{ padding: '0 16px' }}>
             <span className="grow">Валюта</span>
-            <span style={{ width: 80, textAlign: 'right' }}>Покупка</span>
-            <span style={{ width: 80, textAlign: 'right' }}>Продажа</span>
+            <span className="rate-col">Покупка</span>
+            <span className="rate-col">Продажа</span>
           </div>
           <div className="list mt8 stagger">
             {[...FIAT, CRYPTO[0]]
@@ -50,10 +50,10 @@ export function Rates() {
                     <Coin code={c.code} />
                     <div className="grow">
                       <div className="title">{c.code}</div>
-                      <div className="sub ellipsis">{c.name}</div>
+                      <div className="sub">{c.name}</div>
                     </div>
-                    <span style={{ width: 80, textAlign: 'right', fontWeight: 500 }}>{fmtRate(r * k)}</span>
-                    <span style={{ width: 80, textAlign: 'right', fontWeight: 500 }}>{fmtRate(r / k)}</span>
+                    <span className="rate-col num">{fmtRate(r * k)}</span>
+                    <span className="rate-col num">{fmtRate(r / k)}</span>
                   </button>
                 )
               })}

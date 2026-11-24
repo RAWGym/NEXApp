@@ -93,7 +93,7 @@ export function ProfileForm({ onSaved, compact }: { onSaved?: () => void; compac
       </button>
       <div className="trust-row mt12">
         <ILock size={14} />
-        <span>ФИО и дата рождения хранятся в зашифрованном виде (AES-256)</span>
+        <span>ФИО и дата рождения хранятся в зашифрованном виде (<span style={{ whiteSpace: 'nowrap' }}>AES-256</span>)</span>
       </div>
     </div>
   )

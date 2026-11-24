@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AppProvider, useApp, type Tab } from './store'
 import { Backdrop, ToastProvider } from './components/ui'
 import { IChart, IHistory, IHome, ISwap, IUser } from './components/Icons'
@@ -133,9 +133,19 @@ function Shell() {
     content = { home: <Home />, exchange: <Exchange />, rates: <Rates />, history: <History />, profile: <Profile /> }[tab]
   }
 
+  // Направление анимации: вкладка правее выезжает справа, левее слева; вложенный экран справа, возврат слева
+  const prev = useRef({ tab, depth: stack.length })
+  let dir = 'up'
+  if (stack.length > prev.current.depth) dir = 'fwd'
+  else if (stack.length < prev.current.depth) dir = 'back'
+  else if (!top && tab !== prev.current.tab) dir = TABS.findIndex((t) => t.id === tab) > TABS.findIndex((t) => t.id === prev.current.tab) ? 'right' : 'left'
+  useEffect(() => {
+    prev.current = { tab, depth: stack.length }
+  })
+
   return (
     <div className="app">
-      <div key={top ? JSON.stringify(top) : tab}>{content}</div>
+      <div key={top ? JSON.stringify(top) : tab} className="view" data-dir={dir}>{content}</div>
       {!top && (
         <nav className="tabbar">
           <div className="tabbar-inner">

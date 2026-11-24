@@ -11,8 +11,6 @@ const START = ORIGIN + '/admin/'
 const ALLOWED_HOSTS = new Set([
   'nex-app-rho.vercel.app',
   'amgwcbvdgutpvzgcjvjc.supabase.co',
-  'fonts.googleapis.com',
-  'fonts.gstatic.com',
 ])
 
 let win = null

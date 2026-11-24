@@ -25,7 +25,7 @@ html, body, #root { margin: 0; min-height: 100%; }
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: 'Manrope', system-ui, -apple-system, sans-serif;
+  font-family: 'Manrope Variable', 'Manrope', system-ui, -apple-system, sans-serif;
   font-size: 15px;
   line-height: 1.4;
   -webkit-font-smoothing: antialiased;
@@ -473,3 +473,63 @@ span.link-btn { display: inline; margin: 0; padding: 0; font-size: 13px; }
 .keypad .kp-icon.xs { font-size: 14px; }
 @keyframes shake { 10%, 90% { transform: translateX(-2px); } 20%, 80% { transform: translateX(4px); } 30%, 50%, 70% { transform: translateX(-8px); } 40%, 60% { transform: translateX(8px); } }
 @media (max-height: 640px) { .keypad { grid-template-columns: repeat(3, 66px); gap: 12px 22px; } .keypad button, .keypad span { width: 66px; height: 66px; } }
+
+/* ---------- полировка 2026-11-24: типографика, границы, анимации ---------- */
+body { font-variant-numeric: tabular-nums; font-optical-sizing: auto; text-rendering: optimizeLegibility; }
+h1, h2, .title, .topbar h1, .face-step-title { text-wrap: balance; }
+p, .sub, .small, .xs, .muted { text-wrap: pretty; }
+.topbar h1 { letter-spacing: -0.015em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Курсы: колонки цифр ровные, название валюты не обрезается */
+.rate-col { flex: none; width: 76px; text-align: right; }
+.rate-col.num { font-weight: 600; letter-spacing: -0.01em; }
+@media (max-width: 360px) { .rate-col { width: 66px; font-size: 14px; } .list-item { gap: 10px; padding: 13px 14px; } }
+
+/* Метки справа в списках: компактная плашка, текст слева не сжимается */
+.tag { flex: none; white-space: nowrap; font-size: 11.5px; font-weight: 600; padding: 4px 9px; border-radius: 999px; background: rgba(234, 225, 215, 0.07); }
+.tag.amber { background: rgba(224, 178, 92, 0.14); color: var(--amber); }
+
+/* Способ получения: три равные кнопки в одну строку на любом экране */
+.seg-methods button { padding: 0 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 360px) { .seg-methods button { font-size: 13px; } }
+
+/* Подпись с замком: значок рядом с текстом, а не у края */
+.trust-row > span { text-align: left; text-wrap: balance; }
+.trust-row > svg { flex: none; margin-top: 1px; }
+
+/* Плавающая подложка в переключателях и нижнем меню */
+.segment, .tabbar-inner { position: relative; isolation: isolate; }
+.segment.has-pill::before, .tabbar-inner.has-pill::before {
+  content: ''; position: absolute; z-index: -1; left: var(--pl); top: var(--pt); width: var(--pw); height: var(--ph); pointer-events: none;
+}
+.segment.has-pill::before { border-radius: 999px; background: var(--accent); box-shadow: 0 6px 18px -8px rgba(234, 225, 215, 0.45); }
+.tabbar-inner.has-pill::before { border-radius: 18px; background: linear-gradient(180deg, rgba(143,36,52,0.6), rgba(91,15,31,0.6)); box-shadow: 0 0 0 1px rgba(234,225,215,0.08) inset, 0 8px 22px -10px rgba(143,36,52,0.9); }
+.segment.pill-ready::before, .tabbar-inner.pill-ready::before { transition: left 0.45s var(--ease), width 0.45s var(--ease), top 0.45s var(--ease); }
+.segment.has-pill button.on { background: transparent; box-shadow: none; }
+.tabbar-inner.has-pill .tab.on { background: transparent; box-shadow: none; }
+.segment button { transition: color 0.3s var(--ease); }
+
+/* Переходы между экранами с учётом направления */
+.view[data-dir='right'] > .screen { animation: inRight 0.42s var(--ease) backwards; }
+.view[data-dir='left'] > .screen { animation: inLeft 0.42s var(--ease) backwards; }
+.view[data-dir='fwd'] > .screen { animation: inRight 0.4s var(--ease) backwards; }
+.view[data-dir='back'] > .screen { animation: inLeft 0.4s var(--ease) backwards; }
+@keyframes inRight { from { opacity: 0; transform: translateX(28px); } to { opacity: 1; transform: none; } }
+@keyframes inLeft { from { opacity: 0; transform: translateX(-28px); } to { opacity: 1; transform: none; } }
+
+/* Отклик на нажатие */
+.list-item:active { transform: scale(0.985); background: var(--card); }
+.card:is(button):active, button.card:active, .feature:active, .action:active { transform: scale(0.98); }
+
+/* Аккордеон частых вопросов: плавно раскрывается по высоте */
+.acc { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 0.4s var(--ease), opacity 0.3s; opacity: 0; }
+.acc > div { overflow: hidden; }
+.acc.open { grid-template-rows: 1fr; opacity: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .view > .screen, .acc { animation: none !important; transition: none !important; }
+  .segment::before, .tabbar-inner::before { transition: none !important; }
+}
+.item-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; font-weight: 500; }
+.item-head .tag { padding: 2px 8px; font-size: 11px; }
+.tabbar-inner { justify-content: space-between; padding: 0 6px; }

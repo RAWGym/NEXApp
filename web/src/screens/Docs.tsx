@@ -93,9 +93,13 @@ export function Faq() {
           <div key={i} style={{ borderTop: i ? '1px solid var(--line)' : 0 }}>
             <button className="list-item" style={{ borderTop: 0 }} onClick={() => setOpen(open === i ? null : i)}>
               <div className="grow" style={{ fontWeight: 600 }}>{f.q}</div>
-              <IDown size={18} className="chev" style={{ transform: open === i ? 'rotate(180deg)' : '', transition: 'transform .2s' }} />
+              <IDown size={18} className="chev" style={{ transform: open === i ? 'rotate(180deg)' : '', transition: 'transform .35s cubic-bezier(.22,1,.36,1)' }} />
             </button>
-            {open === i && <div className="small muted" style={{ padding: '0 16px 16px', lineHeight: 1.55 }}>{f.a}</div>}
+            <div className={`acc ${open === i ? 'open' : ''}`} aria-hidden={open !== i}>
+              <div>
+                <div className="small muted" style={{ padding: '0 16px 16px', lineHeight: 1.55 }}>{f.a}</div>
+              </div>
+            </div>
           </div>
         ))}
       </div>

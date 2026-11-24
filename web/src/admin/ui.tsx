@@ -39,8 +39,18 @@ export function Seg<T extends string>({ value, options, onChange }: { value: T; 
   const ref = useRef<HTMLDivElement>(null)
   const [pill, setPill] = useState<{ left: number; width: number } | null>(null)
   useLayoutEffect(() => {
-    const el = ref.current?.querySelector<HTMLButtonElement>('button.on')
-    if (el) setPill({ left: el.offsetLeft, width: el.offsetWidth })
+    const root = ref.current
+    if (!root) return
+    // Пересчёт после загрузки шрифта и при изменении размеров, чтобы подложка всегда стояла ровно
+    const place = () => {
+      const el = root.querySelector<HTMLButtonElement>('button.on')
+      if (el) setPill({ left: el.offsetLeft, width: el.offsetWidth })
+    }
+    place()
+    document.fonts?.ready.then(place)
+    const ro = new ResizeObserver(place)
+    ro.observe(root)
+    return () => ro.disconnect()
   }, [value, options.length])
   return (
     <div className="seg" ref={ref} role="tablist">

@@ -148,12 +148,12 @@ export function Kyc() {
             <div className="list mt12 stagger">
               <Row icon={<IUser />} t="Личные данные" s={user?.profile_done ? `${user.full_name}` : 'ФИО, телефон, дата рождения'} done={!!user?.profile_done} />
               <Row icon={<IDoc />} t="Данные документа" s="Номер, ИИН, кем и когда выдан, срок действия" />
-              <Row icon={<IFace />} t="Фото документа и селфи с ним" s="Документ рядом с лицом, данные читаемы" />
+              <Row icon={<IFace />} t={'Фото документа и селфи с\u00a0ним'} s="Документ рядом с лицом, данные читаемы" />
             </div>
             <div className="card mt12 row small muted" style={{ alignItems: 'flex-start' }}>
               <ILock size={20} style={{ flex: 'none', marginTop: 1 }} />
               <div>
-                Данные и фото шифруются (AES-256) и хранятся на защищённых серверах в ЕС (Германия). Доступ есть только у сотрудников, проверяющих анкеты.{' '}
+                Данные и фото шифруются (<span style={{ whiteSpace: 'nowrap' }}>AES-256</span>) и хранятся на защищённых серверах в ЕС (Германия). Доступ есть только у сотрудников, проверяющих анкеты.{' '}
                 <a href="#" onClick={(e) => (e.preventDefault(), push({ name: 'doc', id: 'security' }))}>Подробнее</a>
               </div>
             </div>
