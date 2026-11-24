@@ -32,7 +32,12 @@ export function startPills() {
     clearTimeout(late)
     late = window.setTimeout(sync, 450)
   }
-  new MutationObserver(schedule).observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] })
+  // Размер контейнера тоже следим: подложка пересчитается при любом изменении ширины
+  const ro = new ResizeObserver(schedule)
+  const seen = new WeakSet<Element>()
+  const watch = () => document.querySelectorAll(SEL).forEach((el) => !seen.has(el) && (seen.add(el), ro.observe(el)))
+  new MutationObserver(() => (watch(), schedule())).observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] })
+  watch()
   addEventListener('resize', schedule)
   document.fonts?.ready.then(schedule)
   schedule()

@@ -533,3 +533,6 @@ p, .sub, .small, .xs, .muted { text-wrap: pretty; }
 .item-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; font-weight: 500; }
 .item-head .tag { padding: 2px 8px; font-size: 11px; }
 .tabbar-inner { justify-content: space-between; padding: 0 6px; }
+/* Анимация въезда экрана не должна раздвигать страницу по ширине (на телефоне это давало дрожание) */
+html { overflow-x: clip; }
+.app { overflow-x: clip; }
