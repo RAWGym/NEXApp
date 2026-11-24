@@ -1,6 +1,6 @@
 import { StrictMode, useCallback, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import '@fontsource-variable/manrope'
+import '@fontsource-variable/manrope/index.css'
 import './admin.css'
 import { api, session, setUnauthorizedHandler, type EventItem, type Me } from './api'
 import { Ico, ROLE_NAME, ToastHost, initials, useToast } from './ui'
